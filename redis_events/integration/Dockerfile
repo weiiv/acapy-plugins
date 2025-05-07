@@ -4,7 +4,7 @@ WORKDIR /usr/src/app
 # Install and configure poetry
 USER root
 
-ENV POETRY_VERSION=1.8.3
+ENV POETRY_VERSION=2.1.2
 ENV POETRY_HOME=/opt/poetry
 RUN apt-get update && apt-get install -y curl && apt-get clean
 RUN curl -sSL https://install.python-poetry.org | python -
@@ -24,7 +24,7 @@ WORKDIR /usr/src/app
 COPY --from=base /usr/src/app/.venv /usr/src/app/.venv
 ENV PATH="/usr/src/app/.venv/bin:$PATH"
 
-RUN pip install git+https://github.com/openwallet-foundation/acapy-plugins@main#subdirectory=basicmessage_storage
+RUN pip install git+https://github.com/jamshale/acapy-plugins@main#subdirectory=basicmessage_storage
 
 COPY redis_events/ redis_events/
 COPY docker/*.yml ./

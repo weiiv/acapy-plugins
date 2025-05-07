@@ -99,7 +99,7 @@ upload_resource = mock.AsyncMock(
 )
 
 
-class TestAnoncredsRegistry(IsolatedAsyncioTestCase):
+class TestAnonCredsRegistry(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.profile = await create_test_profile({"wallet.type": "askar-anoncreds"})
         async with self.profile.session() as session:
@@ -138,7 +138,9 @@ class TestAnoncredsRegistry(IsolatedAsyncioTestCase):
                 name="test_schema",
                 version="1.0",
             ),
-            {},
+            {
+                "verificationMethod": f"{test_issuer_id}#key-01",
+            },
         )
         assert isinstance(result, SchemaResult)
         assert result.schema_state.state == "finished"
@@ -198,7 +200,9 @@ class TestAnoncredsRegistry(IsolatedAsyncioTestCase):
                     primary=CredDefValuePrimary("n", "s", {}, "rctxt", "z")
                 ),
             ),
-            {},
+            {
+                "verificationMethod": f"{test_issuer_id}#key-01",
+            },
         )
         assert isinstance(result, CredDefResult)
         assert result.credential_definition_state.state == "finished"
@@ -262,7 +266,9 @@ class TestAnoncredsRegistry(IsolatedAsyncioTestCase):
                 issuer_id=test_issuer_id,
                 type="CL_ACCUM",
             ),
-            {},
+            {
+                "verificationMethod": f"{test_issuer_id}#key-01",
+            },
         )
         assert isinstance(result, RevRegDefResult)
         assert result.revocation_registry_definition_state.state == "finished"
@@ -351,6 +357,9 @@ class TestAnoncredsRegistry(IsolatedAsyncioTestCase):
                 timestamp=1669640864487,
                 rev_reg_def_id=test_rev_reg_id,
             ),
+            {
+                "verificationMethod": f"{test_issuer_id}#key-01",
+            },
         )
         assert isinstance(result, RevListResult)
         assert result.revocation_list_state.state == "finished"
