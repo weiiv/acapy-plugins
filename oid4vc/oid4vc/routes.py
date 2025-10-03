@@ -51,9 +51,12 @@ from oid4vc.models.presentation import OID4VPPresentation, OID4VPPresentationSch
 from oid4vc.models.presentation_definition import OID4VPPresDef, OID4VPPresDefSchema
 from oid4vc.models.request import OID4VPRequest, OID4VPRequestSchema
 
+from .app_resources import AppResources
 from .config import Config
 from .models.exchange import OID4VCIExchangeRecord, OID4VCIExchangeRecordSchema
 from .models.supported_cred import SupportedCredential, SupportedCredentialSchema
+from .utils import get_tenant_subpath, get_auth_header
+
 
 VCI_SPEC_URI = (
     "https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-11.html"
@@ -238,6 +241,7 @@ async def exchange_create(request: web.Request):
     except ValueError as err:
         raise web.HTTPBadRequest(reason=str(err)) from err
 
+    notification_id = secrets.token_urlsafe(CODE_BYTES)
     record = OID4VCIExchangeRecord(
         supported_cred_id=supported_cred_id,
         credential_subject=credential_subject,
@@ -245,6 +249,7 @@ async def exchange_create(request: web.Request):
         state=OID4VCIExchangeRecord.STATE_CREATED,
         verification_method=verification_method,
         issuer_id=issuer_id,
+        notification_id=notification_id,
     )
     LOGGER.debug(f"Created exchange record: {record}")
 
@@ -375,22 +380,67 @@ class CredOfferResponseSchemaRef(OpenAPISchema):
     offer = fields.Nested(CredOfferSchema(), required=True)
 
 
+async def _create_pre_auth_code(
+    profile: Profile,
+    config: Config,
+    subject_id: str,
+    credential_configuration_id: str | None = None,
+    user_pin: str | None = None,
+) -> str:
+    """Create a secure random pre-authorized code."""
+
+    if config.auth_server_url:
+        subpath = get_tenant_subpath(profile, tenant_prefix="/tenant")
+        issuer_server_url = f"{config.endpoint}{subpath}"
+
+        auth_server_url = f"{config.auth_server_url}{get_tenant_subpath(profile)}"
+        grants_endpoint = f"{auth_server_url}/grants/pre-authorized-code"
+
+        auth_header = await get_auth_header(
+            profile, config, issuer_server_url, grants_endpoint
+        )
+        user_pin_required = user_pin is not None
+        resp = await AppResources.get_http_client().post(
+            grants_endpoint,
+            json={
+                "subject_id": subject_id,
+                "user_pin_required": user_pin_required,
+                "user_pin": user_pin,
+                "authorization_details": [
+                    {
+                        "type": "openid_credential",
+                        "credential_configuration_id": credential_configuration_id,
+                    }
+                ],
+            },
+            headers={"Authorization": f"{auth_header}"},
+        )
+        data = await resp.json()
+        code = data["pre_authorized_code"]
+    else:
+        code = secrets.token_urlsafe(CODE_BYTES)
+    return code
+
+
 async def _parse_cred_offer(context: AdminRequestContext, exchange_id: str) -> dict:
     """Helper function for cred_offer request parsing.
 
     Used in get_cred_offer and public_routes.dereference_cred_offer endpoints.
     """
     config = Config.from_settings(context.settings)
-    code = secrets.token_urlsafe(CODE_BYTES)
-
     try:
         async with context.session() as session:
             record = await OID4VCIExchangeRecord.retrieve_by_id(session, exchange_id)
             supported = await SupportedCredential.retrieve_by_id(
                 session, record.supported_cred_id
             )
-
-            record.code = code
+            record.code = await _create_pre_auth_code(
+                context.profile,
+                config,
+                record.exchange_id,
+                supported.identifier,
+                record.pin,
+            )
             record.state = OID4VCIExchangeRecord.STATE_OFFER_CREATED
             await record.save(session, reason="Credential offer created")
     except (StorageError, BaseModelError) as err:
@@ -408,7 +458,7 @@ async def _parse_cred_offer(context: AdminRequestContext, exchange_id: str) -> d
         "credentials": [supported.identifier],
         "grants": {
             "urn:ietf:params:oauth:grant-type:pre-authorized_code": {
-                "pre-authorized_code": code,
+                "pre-authorized_code": record.code,
                 "user_pin_required": user_pin_required,
             }
         },
@@ -481,6 +531,10 @@ class SupportedCredCreateRequestSchema(OpenAPISchema):
     cryptographic_suites_supported = fields.List(
         fields.Str(), metadata={"example": ["ES256K"]}
     )
+    proof_types_supported = fields.Dict(
+        required=False,
+        metadata={"example": {"jwt": {"proof_signing_alg_values_supported": ["ES256"]}}},
+    )
     display = fields.List(
         fields.Dict(),
         metadata={
@@ -514,7 +568,7 @@ class SupportedCredCreateRequestSchema(OpenAPISchema):
                     "degree": {},
                     "gpa": {"display": [{"name": "GPA"}]},
                 },
-                "types": ["VerifiableCredential", "UniversityDegreeCredential"],
+                "type": ["VerifiableCredential", "UniversityDegreeCredential"],
             },
         },
     )
@@ -569,10 +623,10 @@ async def supported_credential_create(request: web.Request):
     body["identifier"] = body.pop("id")
 
     format_data: dict = body.get("format_data", {})
-    if format_data.get("vct") and format_data.get("types"):
+    if format_data.get("vct") and format_data.get("type"):
         raise web.HTTPBadRequest(
-            reason="Cannot have both `vct` and `types`. "
-            "`vct` is for SD JWT and `types` is for JWT VC"
+            reason="Cannot have both `vct` and `type`. "
+            "`vct` is for SD JWT and `type` is for JWT VC"
         )
 
     record = SupportedCredential(
@@ -610,6 +664,10 @@ class JwtSupportedCredCreateRequestSchema(OpenAPISchema):
     )
     cryptographic_suites_supported = fields.List(
         fields.Str(), metadata={"example": ["ES256K"]}
+    )
+    proof_types_supported = fields.Dict(
+        required=False,
+        metadata={"example": {"jwt": {"proof_signing_alg_values_supported": ["ES256"]}}},
     )
     display = fields.List(
         fields.Dict(),
@@ -696,7 +754,7 @@ async def supported_credential_create_jwt(request: web.Request):
     LOGGER.info(f"body: {body}")
     body["identifier"] = body.pop("id")
     format_data = {}
-    format_data["types"] = body.pop("type")
+    format_data["type"] = body.pop("type")
     format_data["credentialSubject"] = body.pop("credentialSubject", None)
     format_data["context"] = body.pop("@context")
     format_data["order"] = body.pop("order", None)
@@ -704,7 +762,7 @@ async def supported_credential_create_jwt(request: web.Request):
     vc_additional_data["@context"] = format_data["context"]
     # type vs types is deliberate; OID4VCI spec is inconsistent with VCDM
     # ~ in Draft 11, fixed in later drafts
-    vc_additional_data["type"] = format_data["types"]
+    vc_additional_data["type"] = format_data["type"]
 
     record = SupportedCredential(
         **body,
@@ -853,14 +911,14 @@ async def jwt_supported_cred_update_helper(
     format_data = {}
     vc_additional_data = {}
 
-    format_data["types"] = body.get("type")
+    format_data["type"] = body.get("type")
     format_data["credentialSubject"] = body.get("credentialSubject", None)
     format_data["context"] = body.get("@context")
     format_data["order"] = body.get("order", None)
     vc_additional_data["@context"] = format_data["context"]
     # type vs types is deliberate; OID4VCI spec is inconsistent with VCDM
     # ~ as of Draft 11, fixed in later drafts
-    vc_additional_data["type"] = format_data["types"]
+    vc_additional_data["type"] = format_data["type"]
 
     record.identifier = body["id"]
     record.format = body["format"]
@@ -870,6 +928,7 @@ async def jwt_supported_cred_update_helper(
     record.cryptographic_suites_supported = body.get(
         "cryptographic_suites_supported", None
     )
+    record.proof_types_supported = body.get("proof_types_supported", None)
     record.display = body.get("display", None)
     record.format_data = format_data
     record.vc_additional_data = vc_additional_data

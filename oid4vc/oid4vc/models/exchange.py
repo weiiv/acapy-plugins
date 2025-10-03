@@ -27,8 +27,17 @@ class OID4VCIExchangeRecord(BaseExchangeRecord):
     STATE_OFFER_CREATED = "offer"
     STATE_ISSUED = "issued"
     STATE_FAILED = "failed"
-    STATES = (STATE_CREATED, STATE_OFFER_CREATED, STATE_ISSUED, STATE_FAILED)
-    TAG_NAMES = {"state", "supported_cred_id", "code"}
+    STATE_ACCEPTED = "accepted"
+    STATE_DELETED = "deleted"
+    STATES = (
+        STATE_CREATED,
+        STATE_OFFER_CREATED,
+        STATE_ISSUED,
+        STATE_FAILED,
+        STATE_ACCEPTED,
+        STATE_DELETED,
+    )
+    TAG_NAMES = {"state", "supported_cred_id", "notification_id", "code"}
 
     def __init__(
         self,
@@ -39,6 +48,8 @@ class OID4VCIExchangeRecord(BaseExchangeRecord):
         credential_subject: Dict[str, Any],
         verification_method: str,
         issuer_id: str,
+        notification_id: Optional[str] = None,
+        notification_event: Optional[dict] = None,
         nonce: Optional[str] = None,
         pin: Optional[str] = None,
         code: Optional[str] = None,
@@ -51,6 +62,8 @@ class OID4VCIExchangeRecord(BaseExchangeRecord):
         self.credential_subject = credential_subject  # (received from submit)
         self.verification_method = verification_method
         self.issuer_id = issuer_id
+        self.notification_id = notification_id
+        self.notification_event = notification_event
         self.nonce = nonce  # in offer
         self.pin = pin  # (when relevant)
         self.code = code
@@ -71,12 +84,25 @@ class OID4VCIExchangeRecord(BaseExchangeRecord):
                 "credential_subject",
                 "verification_method",
                 "issuer_id",
+                "notification_id",
+                "notification_event",
                 "nonce",
                 "pin",
                 "code",
                 "token",
             )
         }
+
+    @classmethod
+    async def retrieve_by_notification_id(
+        cls, session: ProfileSession, notification_id: str | None
+    ):
+        """Retrieve an exchange record by notification_id."""
+        if notification_id:
+            return await cls.retrieve_by_tag_filter(
+                session, {"notification_id": notification_id}
+            )
+        return None
 
     @classmethod
     async def retrieve_by_code(cls, session: ProfileSession, code: str):
@@ -126,6 +152,12 @@ class OID4VCIExchangeRecordSchema(BaseRecordSchema):
             "description": "Information used to identify the issuer",
             "example": ("did:key:z6Mkgg342Ycpuk263R9d8Aq6MUaxPn1DDeHyGo38EefXmgDL"),
         },
+    )
+    notification_id = fields.Str(
+        required=False,
+    )
+    notification_event = fields.Dict(
+        required=False,
     )
     nonce = fields.Str(
         required=False,
