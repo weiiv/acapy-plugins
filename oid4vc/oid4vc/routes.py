@@ -9,6 +9,7 @@ from urllib.parse import quote
 from acapy_agent.admin.decorators.auth import tenant_authentication
 from acapy_agent.admin.request_context import AdminRequestContext
 from acapy_agent.askar.profile import AskarProfileSession
+from acapy_agent.core.profile import Profile
 from acapy_agent.messaging.models.base import BaseModelError
 from acapy_agent.messaging.models.openapi import OpenAPISchema
 from acapy_agent.messaging.valid import (
@@ -18,7 +19,6 @@ from acapy_agent.messaging.valid import (
 )
 from acapy_agent.storage.error import StorageError, StorageNotFoundError
 from acapy_agent.wallet.base import BaseWallet
-from acapy_agent.core.profile import Profile
 from acapy_agent.wallet.default_verification_key_strategy import (
     BaseVerificationKeyStrategy,
 )
@@ -38,6 +38,7 @@ from aries_askar import Key, KeyAlg
 from marshmallow import fields
 from marshmallow.validate import OneOf
 
+
 from oid4vc.cred_processor import CredProcessors
 from oid4vc.jwk import DID_JWK, P256
 from oid4vc.models.dcql_query import (
@@ -55,11 +56,10 @@ from .app_resources import AppResources
 from .config import Config
 from .models.exchange import OID4VCIExchangeRecord, OID4VCIExchangeRecordSchema
 from .models.supported_cred import SupportedCredential, SupportedCredentialSchema
-from .utils import get_tenant_subpath, get_auth_header
-
+from .utils import get_auth_header, get_tenant_subpath
 
 VCI_SPEC_URI = (
-    "https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-11.html"
+    "https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-13.html"
 )
 VP_SPEC_URI = "https://openid.net/specs/openid-4-verifiable-presentations-1_0-ID2.html"
 LOGGER = logging.getLogger(__name__)
@@ -115,7 +115,9 @@ async def list_exchange_records(request: web.BaseRequest):
     try:
         async with context.profile.session() as session:
             if exchange_id := request.query.get("exchange_id"):
-                record = await OID4VCIExchangeRecord.retrieve_by_id(session, exchange_id)
+                record = await OID4VCIExchangeRecord.retrieve_by_id(
+                    session, exchange_id
+                )
                 results = [record.serialize()]
             else:
                 filter_ = {
@@ -171,14 +173,7 @@ class ExchangeRecordCreateRequestSchema(OpenAPISchema):
     )
 
 
-@docs(
-    tags=["oid4vci"],
-    summary=("Create a credential exchange record"),
-)
-@request_schema(ExchangeRecordCreateRequestSchema())
-@response_schema(OID4VCIExchangeRecordSchema())
-@tenant_authentication
-async def exchange_create(request: web.Request):
+async def create_exchange(request: web.Request, refresh_id: str | None = None):
     """Request handler for creating a credential from attr values.
 
     The internal credential record will be created without the credential
@@ -186,6 +181,7 @@ async def exchange_create(request: web.Request):
 
     Args:
         request: aiohttp request object
+        refresh_id: optional refresh identifier for the exchange record
 
     Returns:
         The credential exchange record
@@ -249,6 +245,7 @@ async def exchange_create(request: web.Request):
         state=OID4VCIExchangeRecord.STATE_CREATED,
         verification_method=verification_method,
         issuer_id=issuer_id,
+        refresh_id=refresh_id,
         notification_id=notification_id,
     )
     LOGGER.debug(f"Created exchange record: {record}")
@@ -256,7 +253,70 @@ async def exchange_create(request: web.Request):
     async with context.session() as session:
         await record.save(session, reason="New OpenID4VCI exchange")
 
+    return record
+
+
+@docs(
+    tags=["oid4vci"],
+    summary=("Create a credential exchange record"),
+)
+@request_schema(ExchangeRecordCreateRequestSchema())
+@response_schema(OID4VCIExchangeRecordSchema())
+@tenant_authentication
+async def exchange_create(request: web.Request):
+    """Request handler for creating a credential from attr values."""
+
+    record = await create_exchange(request)
     return web.json_response(record.serialize())
+
+
+class ExchangeRefreshIDMatchSchema(OpenAPISchema):
+    """Path parameters and validators for request taking credential exchange id."""
+
+    refresh_id = fields.Str(
+        required=True,
+        metadata={
+            "description": "Credential refresh identifier",
+        },
+    )
+
+
+@docs(
+    tags=["oid4vci"],
+    summary=("Patch a credential exchange record"),
+)
+@match_info_schema(ExchangeRefreshIDMatchSchema())
+@request_schema(ExchangeRecordCreateRequestSchema())
+@response_schema(OID4VCIExchangeRecordSchema())
+@tenant_authentication
+async def credential_refresh(request: web.Request):
+    """Request handler for creating a refresh credential from attr values."""
+    context: AdminRequestContext = request["context"]
+    refresh_id = request.match_info["refresh_id"]
+
+    try:
+        async with context.session() as session:
+            try:
+                existing = await OID4VCIExchangeRecord.retrieve_by_refresh_id(
+                    session=session,
+                    refresh_id=refresh_id,
+                    for_update=True,
+                )
+                if existing:
+                    if existing.state == OID4VCIExchangeRecord.STATE_OFFER_CREATED:
+                        raise web.HTTPBadRequest(reason="Offer exists; cannot refresh.")
+                    else:
+                        existing.state = OID4VCIExchangeRecord.STATE_SUPERCEDED
+                        await existing.save(
+                            session, reason="Superceded by new request."
+                        )
+            except StorageNotFoundError:
+                pass
+        record = await create_exchange(request, refresh_id)
+        return web.json_response(record.serialize())
+
+    except (StorageError, BaseModelError) as err:
+        raise web.HTTPBadRequest(reason=err.roll_up) from err
 
 
 class ExchangeRecordIDMatchSchema(OpenAPISchema):
@@ -437,7 +497,7 @@ async def _parse_cred_offer(context: AdminRequestContext, exchange_id: str) -> d
             record.code = await _create_pre_auth_code(
                 context.profile,
                 config,
-                record.exchange_id,
+                record.refresh_id,
                 supported.identifier,
                 record.pin,
             )
@@ -533,7 +593,9 @@ class SupportedCredCreateRequestSchema(OpenAPISchema):
     )
     proof_types_supported = fields.Dict(
         required=False,
-        metadata={"example": {"jwt": {"proof_signing_alg_values_supported": ["ES256"]}}},
+        metadata={
+            "example": {"jwt": {"proof_signing_alg_values_supported": ["ES256"]}}
+        },
     )
     display = fields.List(
         fields.Dict(),
@@ -667,7 +729,9 @@ class JwtSupportedCredCreateRequestSchema(OpenAPISchema):
     )
     proof_types_supported = fields.Dict(
         required=False,
-        metadata={"example": {"jwt": {"proof_signing_alg_values_supported": ["ES256"]}}},
+        metadata={
+            "example": {"jwt": {"proof_signing_alg_values_supported": ["ES256"]}}
+        },
     )
     display = fields.List(
         fields.Dict(),
@@ -877,7 +941,9 @@ async def get_supported_credential_by_id(request: web.Request):
 
     try:
         async with context.session() as session:
-            record = await SupportedCredential.retrieve_by_id(session, supported_cred_id)
+            record = await SupportedCredential.retrieve_by_id(
+                session, supported_cred_id
+            )
     except StorageNotFoundError as err:
         raise web.HTTPNotFound(reason=err.roll_up) from err
     except (StorageError, BaseModelError) as err:
@@ -957,7 +1023,9 @@ async def update_supported_credential_jwt_vc(request: web.Request):
     LOGGER.info(f"body: {body}")
     try:
         async with context.session() as session:
-            record = await SupportedCredential.retrieve_by_id(session, supported_cred_id)
+            record = await SupportedCredential.retrieve_by_id(
+                session, supported_cred_id
+            )
 
             assert isinstance(session, AskarProfileSession)
             record = await jwt_supported_cred_update_helper(record, body, session)
@@ -998,7 +1066,9 @@ async def supported_credential_remove(request: web.Request):
 
     try:
         async with context.session() as session:
-            record = await SupportedCredential.retrieve_by_id(session, supported_cred_id)
+            record = await SupportedCredential.retrieve_by_id(
+                session, supported_cred_id
+            )
             await record.delete_record(session)
     except StorageNotFoundError as err:
         raise web.HTTPNotFound(reason=err.roll_up) from err
@@ -1214,7 +1284,9 @@ async def create_dcql_query(request: web.Request):
         for cred in credentials:
             cred_queries.append(CredentialQuery.deserialize(cred))
 
-        dcql_query = DCQLQuery(credentials=cred_queries, credential_sets=credential_sets)
+        dcql_query = DCQLQuery(
+            credentials=cred_queries, credential_sets=credential_sets
+        )
         await dcql_query.save(session=session)
 
     return web.json_response(
@@ -1555,7 +1627,9 @@ async def list_oid4vp_presentations(request: web.Request):
     try:
         async with context.profile.session() as session:
             if presentation_id := request.query.get("presentation_id"):
-                record = await OID4VPPresentation.retrieve_by_id(session, presentation_id)
+                record = await OID4VPPresentation.retrieve_by_id(
+                    session, presentation_id
+                )
                 results = [record.serialize()]
             else:
                 filter_ = {
@@ -1827,7 +1901,9 @@ async def create_did_jwk(request: web.Request):
         jwk = json.loads(key.get_jwk_public())
         jwk["use"] = "sig"
 
-        did = "did:jwk:" + bytes_to_b64(json.dumps(jwk).encode(), urlsafe=True, pad=False)
+        did = "did:jwk:" + bytes_to_b64(
+            json.dumps(jwk).encode(), urlsafe=True, pad=False
+        )
 
         did_info = DIDInfo(
             did=did,
@@ -1852,15 +1928,22 @@ async def register(app: web.Application):
                 get_cred_offer_by_ref,
                 allow_head=False,
             ),
+            web.patch("/oid4vci/credential-refresh/{refresh_id}", credential_refresh),
             web.get(
                 "/oid4vci/exchange/records",
                 list_exchange_records,
                 allow_head=False,
             ),
             web.post("/oid4vci/exchange/create", exchange_create),
-            web.get("/oid4vci/exchange/records/{exchange_id}", get_exchange_by_id),
+            web.get(
+                "/oid4vci/exchange/records/{exchange_id}",
+                get_exchange_by_id,
+                allow_head=False,
+            ),
             web.delete("/oid4vci/exchange/records/{exchange_id}", exchange_delete),
-            web.post("/oid4vci/credential-supported/create", supported_credential_create),
+            web.post(
+                "/oid4vci/credential-supported/create", supported_credential_create
+            ),
             web.post(
                 "/oid4vci/credential-supported/create/jwt",
                 supported_credential_create_jwt,
@@ -1873,6 +1956,7 @@ async def register(app: web.Application):
             web.get(
                 "/oid4vci/credential-supported/records/{supported_cred_id}",
                 get_supported_credential_by_id,
+                allow_head=False,
             ),
             web.put(
                 "/oid4vci/credential-supported/records/jwt/{supported_cred_id}",

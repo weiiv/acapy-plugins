@@ -285,7 +285,11 @@ async def token(request: web.Request):
     if config.auth_server_url:
         subpath = get_tenant_subpath(context.profile)
         token_url = f"{config.auth_server_url}{subpath}/token"
-        raise web.HTTPFound(location=token_url)
+        # raise web.HTTPFound(location=token_url)
+        form = await request.post()
+        async with AppResources.get_http_client().post(token_url, data=form) as resp:
+            resp_data = await resp.json()
+            return web.json_response(resp_data, status=resp.status)
 
     context: AdminRequestContext = request["context"]
     form = await request.post()
@@ -474,20 +478,31 @@ async def issue_cred(request: web.Request):
     """
     context: AdminRequestContext = request["context"]
     token_result = await check_token(context, request.headers.get("Authorization"))
-    exchange_id = token_result.payload["sub"]
+    refresh_id = token_result.payload["sub"]
     body = await request.json()
     LOGGER.info(f"request: {body}")
     try:
         async with context.profile.session() as session:
-            ex_record = await OID4VCIExchangeRecord.retrieve_by_id(session, exchange_id)
+            ex_record = await OID4VCIExchangeRecord.retrieve_by_refresh_id(
+                session, refresh_id=refresh_id
+            )
+            if not ex_record:
+                raise StorageNotFoundError("No exchange record found")
+            is_offer = (
+                True
+                if ex_record.state == OID4VCIExchangeRecord.STATE_OFFER_CREATED
+                else False
+            )
             supported = await SupportedCredential.retrieve_by_id(
                 session, ex_record.supported_cred_id
             )
-    except (StorageError, BaseModelError, StorageNotFoundError) as err:
+    except StorageNotFoundError as err:
+        raise web.HTTPNotFound(reason="No credential offer available.") from err
+    except (StorageError, BaseModelError) as err:
         raise web.HTTPBadRequest(reason=err.roll_up) from err
 
     if not supported.format:
-        raise web.HTTPBadRequest(reason="SupportedCredential missing format identifier")
+        raise web.HTTPBadRequest(reason="SupportedCredential missing format identifier.")
 
     if supported.format != body.get("format"):
         raise web.HTTPBadRequest(reason="Requested format does not match offer.")
@@ -544,13 +559,15 @@ async def issue_cred(request: web.Request):
         # But we'll leave it to the controller
         # await ex_record.delete_record(session)
 
-    return web.json_response(
-        {
-            "format": supported.format,
-            "credential": credential,
-            "notification_id": ex_record.notification_id,
-        }
-    )
+    cred_response = {
+        "format": supported.format,
+        "credential": credential,
+        "notification_id": ex_record.notification_id,
+    }
+    if is_offer:
+        cred_response["refresh_id"] = ex_record.refresh_id
+
+    return web.json_response(cred_response)
 
 
 class OID4VPRequestIDMatchSchema(OpenAPISchema):
