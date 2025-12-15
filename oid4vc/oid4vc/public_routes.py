@@ -526,13 +526,13 @@ async def issue_cred(request: web.Request):
     if not pop.verified:
         raise web.HTTPBadRequest(reason="Invalid proof")
 
-    try:
-        processors = context.inject(CredProcessors)
-        processor = processors.issuer_for_format(supported.format)
+   # try:
+    processors = context.inject(CredProcessors)
+    processor = processors.issuer_for_format(supported.format)
 
-        credential = await processor.issue(body, supported, ex_record, pop, context)
-    except CredProcessorError as e:
-        raise web.HTTPBadRequest(reason=e.message)
+    credential = await processor.issue(body, supported, ex_record, pop, context)
+   # except CredProcessorError as e:
+   #     raise web.HTTPBadRequest(reason=e.message)
 
     async with context.session() as session:
         ex_record.state = OID4VCIExchangeRecord.STATE_ISSUED
