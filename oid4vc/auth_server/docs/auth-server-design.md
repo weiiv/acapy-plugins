@@ -13,7 +13,7 @@ This system supports **secure, standards-aligned issuance of Verifiable Credenti
 - 🔐 **Pre-Authorized Code Flow** – Enables issuance without user login
 - 🛡️ **DPoP-bound Access Tokens** – Proof-of-possession enforcement ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html))
 - 📄 **Authorization Details** – Credential-specific authorization rules ([RFC 9396](https://www.rfc-editor.org/rfc/rfc9396.html))
-- 🧾 **Attestation PoP** – Verified by the Authorization Server using attestation PoP JWT presented by the wallet
+- 🧾 **Attestation PoP** – Wallet Provider signs an attestation JWT (`kid`-based); the Authorization Server verifies it against a managed allow list of trusted providers
 - 🔁 **Refresh Token Rotation** – Mitigates token reuse and supports long-lived sessions
 - 🧠 **Token Introspection** – Fine-grained validation with embedded credential metadata
 - 🌐 **Metadata Discovery** – Standards-based wallet interoperability via `.well-known` endpoints
@@ -155,7 +155,7 @@ sequenceDiagram
   Wallet->>AuthorizationServer: POST /token
   Note over Wallet, AuthorizationServer: Includes:<br/>- pre-authorized_code<br/>- DPoP JWT<br/>- client_attestation PoP JWT
   alt Valid `/token` request
-    AuthorizationServer->>AuthorizationServer: Validate DPoP + Attestation PoP
+    AuthorizationServer->>AuthorizationServer: Validate DPoP + Attestation (kid lookup in allow list)
     AuthorizationServer->>DB: Store access_token (with cnf.jkt, amr, attestation metadata) + refresh_token
     AuthorizationServer-->>Wallet: access_token, refresh_token
   else Invalid
@@ -200,15 +200,16 @@ sequenceDiagram
 
 | Component            | Validates                                                                                                                                  |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Authorization Server | Pre-auth code; **DPoP JWT** (proof-of-possession); **Attestation PoP JWT** per policy; refresh token rotation (validated for `used=false`) |
+| Authorization Server | Pre-auth code; **DPoP JWT** (proof-of-possession); **Attestation JWT** (verified via `kid` + allow list); refresh token rotation (validated for `used=false`) |
 | Credential Issuer    | Introspection (active token, realm match); **DPoP match (`cnf.jkt`)**; Nonce proof                                                         |
 
 ---
 
 ### 📦 Notes
 
-- Attestation PoP is verified by the Authorization Server at `/token`.
+- Attestation JWT is verified by the Authorization Server at `/token` using `kid` + `iss` lookup against the allow list of trusted Wallet Providers.
 - DPoP `jkt` thumbprint is stored in `access_token.cnf_jkt`, and enforced by both the AS (at `/token`) and Issuer (at `/credential`).
+- The attestation `cnf.jwk` thumbprint must match the DPoP proof thumbprint, binding provider attestation to key possession.
 - The Issuer uses `/introspect` to validate the access token and retrieve embedded claims (e.g., `cnf.jkt`, `amr`, and `attestation` metadata), then performs its own DPoP check.
 - Wallets **do not** send attestation to `/credential`; it’s only relevant at `/token`.
 
@@ -216,23 +217,32 @@ sequenceDiagram
 
 ## 🧾 Attestation PoP
 
-**Purpose:** Provide an additional verifiable PoP signal at `/token`, without any interaction with external attestation providers.
+**Purpose:** Provide an additional verifiable PoP signal at `/token`, ensuring the client is a legitimate wallet attested by a trusted Wallet Provider.
 
 ### Flow
 
-1. **Client Attestation PoP JWT (policy-driven)**
+1. **Attestation JWT (signed by Wallet Provider)**
 
-   - Issued by the wallet provider and signed.
-   - Contains claims the Auth Server can verify (e.g., `iss`, `sub`, `iat`, `exp`, a key-binding claim).
+   - Wallet Provider signs the JWT with their private key. Header contains `kid` (key identifier), payload contains `iss`, `sub`, `cnf.jwk`, `iat`, `exp`.
+   - The `cnf.jwk` contains the wallet instance's public key, binding the attestation to the wallet's DPoP key.
 
-2. **Verification (Authorization Server)**
+2. **Allow List (Trusted Wallet Providers)**
 
-   - Validate signature and required claims.
-   - Optionally bind to the same key used for DPoP by matching a thumbprint (`jkt`) claim.
-   - Apply trust policy: `auto_trust`, `allow_list`, or `deny_list`.
+   - Admin registers trusted providers via API: `iss` + `kid` + public key (JWK).
+   - Provider keys are obtained out-of-band (e.g., published on wallet provider's website).
+   - This is a closed ecosystem — no DID resolution or discoverability needed.
 
-3. **Outcome**
-   - If policy requires attestation PoP and verification fails → `invalid_attestation`.
+3. **Verification (Authorization Server)**
+
+   - Extract `kid` from header and `iss` from payload.
+   - Look up the provider's public key by `iss` + `kid` in the allow list.
+   - Verify signature using the provider's public key.
+   - Validate claims (`iss`, `sub`, `iat`, `exp`) and time validity (± clock skew).
+   - Compute thumbprint of `cnf.jwk` and verify it matches the DPoP proof thumbprint (binds attestation to possession).
+
+4. **Outcome**
+   - If `iss` + `kid` not found → `invalid_attestation` (untrusted provider).
+   - If signature or claims invalid → `invalid_attestation`.
    - On success, record outcome in `ACCESS_TOKEN.metadata` and add `"att-pop"` to `amr`.
 
 ### Example `/token` Request (with Attestation PoP)
@@ -247,16 +257,66 @@ pre-authorized_code=abc123&
 client_attestation=eyJhbGciOiJSUzI1NiIs...
 ```
 
-### Trust Policy Modes
+```mermaid
+sequenceDiagram
+  participant WalletProvider as Wallet Provider
+  participant Wallet
+  participant AuthServer as Authorization Server
+  participant Issuer as Credential Issuer
+  participant DB
 
-- **auto_trust** – Accept any syntactically valid, verifiable PoP JWT.
-- **allow_list** – Accept only if (`sub`, optional `jkt`) pair appears in a configured list.
-- **deny_list** – Explicitly reject known-bad `sub` (and/or `jkt`).
+  Note over WalletProvider,Wallet: Wallet Attestation Provisioning
 
-**Errors (Auth Server):**
+  Wallet->>WalletProvider: Request attestation (app identity + device proof)
+  WalletProvider->>WalletProvider: Verify app integrity & platform attestation
+  WalletProvider->>WalletProvider: Sign attestation JWT with provider key (kid: "11")
+  Note over WalletProvider: Header: { alg, typ, kid }<br/>Payload: { iss, sub, cnf.jwk, iat, exp }
+  WalletProvider-->>Wallet: Attestation PoP JWT
+  Note over Wallet: Wallet caches attestation JWT<br/>(valid until exp)
 
-- `invalid_attestation` – Missing/malformed/expired/failed verification.
-- `invalid_request` – Violates trust policy.
+  Note over WalletProvider,AuthServer: Admin: Register Trusted Wallet Providers
+
+  WalletProvider-->>AuthServer: Out-of-band: publish public key(s)
+  Note over AuthServer: Admin registers via API:<br/>iss + kid + public key (JWK)<br/>stored in allow list table
+
+  Note over Wallet,AuthServer: Token Request with Attestation
+
+  Wallet->>AuthServer: POST /token
+  Note over Wallet,AuthServer: Form body includes:<br/>• grant_type + pre-authorized_code<br/>• client_attestation = <attestation PoP JWT><br/>Header: DPoP = <DPoP proof JWT>
+
+  AuthServer->>AuthServer: 1. Decode attestation JWT header & payload
+  AuthServer->>AuthServer: 2. Extract kid from header, iss from payload
+  AuthServer->>DB: 3. Look up public key by iss + kid in allow list
+
+  alt iss + kid found in allow list
+    DB-->>AuthServer: Wallet Provider public key (JWK)
+    AuthServer->>AuthServer: 4. Verify signature using provider's public key
+    AuthServer->>AuthServer: 5. Validate claims (iss, sub, iat, exp)
+    AuthServer->>AuthServer: 6. Check time validity (iat/exp ± clock skew)
+    AuthServer->>AuthServer: 7. Compute thumbprint of cnf.jwk, verify matches DPoP JKT
+
+    alt Attestation valid
+      AuthServer->>DB: Store access_token with attestation metadata + amr: ["att-pop"]
+      AuthServer-->>Wallet: 200 access_token, refresh_token
+    else Signature or claims invalid
+      AuthServer-->>Wallet: 400 invalid_attestation
+    end
+
+  else iss + kid not found
+    DB-->>AuthServer: No match
+    AuthServer-->>Wallet: 400 invalid_attestation (untrusted provider)
+  end
+
+  Note over Wallet,AuthServer: Credential Request & Introspection
+
+  Wallet->>Issuer: POST /credential (Bearer access_token + DPoP)
+  Issuer->>AuthServer: POST /introspect (token)
+  AuthServer->>DB: Look up access_token + metadata
+  AuthServer-->>Issuer: active: true, cnf.jkt, amr, attestation metadata
+  Issuer->>Issuer: Verify DPoP proof matches cnf.jkt
+  Issuer->>Issuer: Check attestation metadata from introspection (optional policy)
+  Issuer-->>Wallet: Verifiable Credential
+```
 
 ---
 
@@ -325,7 +385,7 @@ sequenceDiagram
     CredentialIssuer-->>Wallet: Metadata (token/credential endpoints)
 
     Wallet->>AuthServer: POST /token (pre-auth-code + DPoP + attestation PoP)
-    AuthServer->>DB: Validate + bind DPoP + attestation policy
+    AuthServer->>DB: Validate + bind DPoP + verify attestation (kid lookup)
     AuthServer-->>Wallet: access_token + refresh_token
 
     Wallet->>CredentialIssuer: POST /credential + DPoP
@@ -479,11 +539,10 @@ token_type_hint=access_token
   "attestation": {
     "present": true,
     "verified": true,
-    "policy": "allow_list",
-    "decision": "trusted",
-    "jkt": "QmFzZTY0ZW5jb2RlZFRodW1icHJpbnQ=",
-    "sub": "wallet.app.id:123",
-    "hash": "sha256:2f1c...ab",
+    "iss": "https://wallet-provider.example.com",
+    "kid": "11",
+    "sub": "https://wallet.example.org",
+    "cnf_jkt": "QmFzZTY0ZW5jb2RlZFRodW1icHJpbnQ=",
     "iat": 1721028000,
     "exp": 1721031600
   }
@@ -657,7 +716,7 @@ GET /.well-known/openid-configuration
 - Standard OAuth2 errors: `invalid_token`, `expired_token`, `invalid_grant`, etc.
 - DPoP errors: `invalid_dpop_proof`, `replay_detected`.
 - Nonce errors: `invalid_request` for invalid/expired nonces; `too_many_requests` for exceeding rate limits.
-- Attestation errors: `invalid_attestation` or `invalid_request` if `client_attestation` is missing/invalid or fails policy.
+- Attestation errors: `invalid_attestation` if `client_attestation` is missing/invalid, signature verification fails, or `iss` + `kid` not found in the allow list.
 
 ---
 
@@ -750,6 +809,17 @@ erDiagram
         TIMESTAMPTZ created_at
         TIMESTAMPTZ updated_at
     }
+
+    WALLET_PROVIDER {
+        INT id PK
+        TEXT iss "INDEX"
+        TEXT kid "INDEX"
+        JSONB public_key "JWK format"
+        TEXT name
+        BOOLEAN active
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
+    }
 ```
 
 **Note**: ACCESS_TOKEN.metadata may include amr and attestation outcome.
@@ -769,9 +839,9 @@ erDiagram
 
 - **JWT (JSON Web Token)**: A compact, signed token format (RFC 7519).
 - **JWK (JSON Web Key)**: JSON representation of a cryptographic key (RFC 7517).
-- **JKT (JWK Thumbprint)**: Base64url-encoded hash of a JWK (RFC 7638). Used in DPoP and, optionally, in attestation PoP binding.
+- **JKT (JWK Thumbprint)**: Base64url-encoded hash of a JWK (RFC 7638). Used in DPoP and in attestation `cnf.jwk` binding.
 - **JTI (JWT ID)**: Unique ID for a JWT, used for replay prevention in DPoP flows.
 - **DPoP**: Mechanism to bind access tokens to a client’s key (RFC 9449).
-- **Attestation PoP**: JWT from the wallet, verified by the Authorization Server to assert client/app properties under a trust policy.
+- **Attestation PoP**: JWT signed by a trusted Wallet Provider (identified by `iss` + `kid`), verified by the Authorization Server against a managed allow list. Contains `cnf.jwk` binding the wallet instance's key.
 - **Pre-authorized Code**: One-time-use code issued by the AS to enable issuance without user login.
 - **Realm**: Logical identifier mapping a token to a specific tenant.
