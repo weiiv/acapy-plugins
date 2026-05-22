@@ -106,15 +106,27 @@ async def get_tenant_jwks(session: AsyncSession, uid: str) -> Dict[str, List[dic
     return {"keys": keys}
 
 
-async def lookup_wallet_provider(iss: str, kid: str) -> dict | None:
-    """Look up a wallet provider key by iss + kid from the in-memory cache.
+async def lookup_wallet_provider(
+    iss: str, kid: str | None = None
+) -> dict | None:
+    """Look up wallet provider key(s) by iss (+ optional kid).
 
-    For jwks_uri providers, refreshes from the URI on kid miss.
-    For inline jwks providers, returns None on kid miss.
+    When *kid* is provided, returns a single key dict under ``public_key``.
+    When *kid* is omitted, returns all cached keys under ``keys``.
     """
-    key = await _provider_jwks_cache.get_key(iss, kid)
-    if key:
-        return {"iss": iss, "public_key": key.as_dict(private=False)}
+    if kid:
+        key = await _provider_jwks_cache.get_key(iss, kid)
+        if key:
+            return {"iss": iss, "public_key": key.as_dict(private=False)}
+        logger.info("kid %r not found for provider %s", kid, iss)
+        return None
 
-    logger.info("kid %r not found for provider %s", kid, iss)
-    return None
+    # No kid — return full keyset for trial verification
+    key_set = _provider_jwks_cache.get_keyset(iss)
+    if not key_set or not key_set.keys:
+        logger.info("No keys cached for provider %s", iss)
+        return None
+    return {
+        "iss": iss,
+        "keys": [k.as_dict(private=False) for k in key_set.keys],
+    }

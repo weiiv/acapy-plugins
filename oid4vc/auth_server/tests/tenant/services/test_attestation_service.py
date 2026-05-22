@@ -131,10 +131,12 @@ async def test_required_missing_raises(default_settings):
     assert exc_info.value.error == "invalid_client_attestation"
 
 
-async def test_missing_kid_raises(default_settings):
-    """Attestation JWT without kid in header should fail."""
-    # Build a JWT with no kid in header
-    header = _b64({"alg": "ES256", "typ": "oauth-client-attestation+jwt"})
+async def test_invalid_kid_type_raises(default_settings):
+    """Attestation JWT with non-string kid in header should fail."""
+    # Build a JWT with kid as integer (invalid type)
+    header = _b64(
+        {"alg": "ES256", "typ": "oauth-client-attestation+jwt", "kid": 123}
+    )
     payload = _b64(
         {"iss": "https://provider.example", "sub": "wallet", "iat": 1, "exp": 2}
     )
@@ -145,7 +147,7 @@ async def test_missing_kid_raises(default_settings):
             client_attestation=token,
             attestation_required=True,
         )
-    assert "missing_kid" in exc_info.value.description
+    assert "invalid_kid" in exc_info.value.description
 
 
 async def test_untrusted_provider_raises(default_settings, provider_keys, monkeypatch):
