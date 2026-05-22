@@ -53,15 +53,10 @@ CREATE TABLE IF NOT EXISTS refresh_token (
   metadata JSONB
 );
 
-CREATE TABLE IF NOT EXISTS dpop_jti (
-  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  subject_id INTEGER NOT NULL REFERENCES subject (id) ON UPDATE CASCADE ON DELETE CASCADE,
-  jti TEXT NOT NULL UNIQUE,
-  htm TEXT,
-  htu TEXT,
-  cnf_jkt TEXT,
-  issued_at TIMESTAMPTZ NOT NULL,
-  expires_at TIMESTAMPTZ NOT NULL
+CREATE TABLE IF NOT EXISTS jti_seen (
+  jti TEXT PRIMARY KEY,
+  expires_at TIMESTAMPTZ NOT NULL,
+  metadata JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_token_expires_at ON access_token (expires_at);
@@ -77,4 +72,4 @@ WHERE
 
 CREATE INDEX IF NOT EXISTS idx_pre_auth_code_expires_at ON pre_auth_code (expires_at);
 
-CREATE INDEX IF NOT EXISTS idx_dpop_jti_expires_at ON dpop_jti (expires_at);
+CREATE INDEX IF NOT EXISTS ix_jti_seen_expires_at ON jti_seen (expires_at);
