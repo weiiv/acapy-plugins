@@ -96,6 +96,15 @@ class JWKSCache:
         self._cache[key] = (time.time(), key_set, jwks_uri)
         self._touch(key)
 
+    def get_keyset(self, key: str) -> KeySet | None:
+        """Return the full KeySet for a cache key, or None if not cached."""
+        cached = self._cache.get(key)
+        if not cached:
+            return None
+        self._touch(key)
+        _, key_set, _ = cached
+        return key_set
+
     async def get_key(self, key: str, kid: str) -> Key | None:
         """Return a single key by kid, refreshing from jwks_uri on miss."""
         cached = self._cache.get(key)

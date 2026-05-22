@@ -56,9 +56,9 @@ async def sign_jwt(
 @router.get("/wallet-providers/lookup")
 async def wallet_provider_lookup(
     iss: str = Query(...),
-    kid: str = Query(...),
+    kid: str | None = Query(None),
 ):
-    """Look up a wallet provider key by iss + kid from cache."""
+    """Look up a wallet provider key by iss + optional kid from cache."""
     result = await lookup_wallet_provider(iss, kid)
     if not result:
         return {"found": False}
