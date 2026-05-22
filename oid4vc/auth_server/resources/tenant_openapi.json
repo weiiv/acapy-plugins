@@ -1,0 +1,598 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OAuth 2.0 Authorization Server Tenant API",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/.well-known/oauth-authorization-server/tenants/{uid}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Openid Configuration",
+        "description": "Return OIDC discovery for the tenant.",
+        "operationId": "openid_configuration__well_known_oauth_authorization_server_tenants__uid__get",
+        "parameters": [
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Uid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/jwks.json/tenants/{uid}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Jwks",
+        "description": "Return JWKS (RFC 7517) for the tenant.",
+        "operationId": "jwks__well_known_jwks_json_tenants__uid__get",
+        "parameters": [
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Uid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tenants/{uid}/token": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Token Endpoint",
+        "description": "Delegate token issuance to Authlib AuthorizationServer with custom grants.",
+        "operationId": "token_endpoint_tenants__uid__token_post",
+        "parameters": [
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Uid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_token_endpoint_tenants__uid__token_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tenants/{uid}/grants/pre-authorized-code": {
+      "post": {
+        "tags": [
+          "protected"
+        ],
+        "summary": "Issue Pre Authorized Code",
+        "description": "Issue a pre-authorized code for the current tenant.",
+        "operationId": "issue_pre_authorized_code_tenants__uid__grants_pre_authorized_code_post",
+        "security": [
+          {
+            "HTTPBasic": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Uid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreAuthGrantIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreAuthGrantOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tenants/{uid}/introspect": {
+      "post": {
+        "tags": [
+          "protected"
+        ],
+        "summary": "Introspect",
+        "description": "Return RFC 7662-style token introspection payload.",
+        "operationId": "introspect_tenants__uid__introspect_post",
+        "security": [
+          {
+            "HTTPBasic": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Uid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_introspect_tenants__uid__introspect_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "summary": "Health Check",
+        "description": "Simple tenant server health check.",
+        "operationId": "health_check_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tenants/{uid}/healthz": {
+      "get": {
+        "summary": "Tenant Health Check",
+        "description": "Tenant-scoped health check; DB connectivity is verified by dependency ping.",
+        "operationId": "tenant_health_check_tenants__uid__healthz_get",
+        "parameters": [
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Uid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AuthorizationDetails": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "Must be 'openid_credential'"
+          },
+          "credential_configuration_id": {
+            "type": "string",
+            "title": "Credential Configuration Id",
+            "description": "Credential configuration identifier"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "type",
+          "credential_configuration_id"
+        ],
+        "title": "AuthorizationDetails",
+        "description": "Authorization details."
+      },
+      "Body_introspect_tenants__uid__introspect_post": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "title": "Body_introspect_tenants__uid__introspect_post"
+      },
+      "Body_token_endpoint_tenants__uid__token_post": {
+        "properties": {
+          "grant_type": {
+            "type": "string",
+            "enum": [
+              "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+              "refresh_token"
+            ],
+            "title": "Grant Type",
+            "description": "Grant type"
+          },
+          "pre_authorized_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pre Authorized Code"
+          },
+          "pre_authorized_code_alt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pre Authorized Code Alt"
+          },
+          "tx_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tx Code"
+          },
+          "refresh_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "grant_type"
+        ],
+        "title": "Body_token_endpoint_tenants__uid__token_post"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "PreAuthGrantIn": {
+        "properties": {
+          "subject_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Id"
+          },
+          "subject_metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Metadata",
+            "description": "Saved to subject.metadata when creating a subject",
+            "examples": [
+              {
+                "email": "test@example.com",
+                "family_name": "User",
+                "given_name": "Test"
+              }
+            ]
+          },
+          "tx_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tx Code"
+          },
+          "authorization_details": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AuthorizationDetails"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authorization Details",
+            "description": "Saved to pre_auth_code.authorization_details",
+            "examples": [
+              [
+                {
+                  "credential_configuration_id": "UniversityDegreeCredential",
+                  "locations": [
+                    "https://credential-issuer.example.com"
+                  ],
+                  "type": "openid_credential"
+                },
+                {
+                  "credential_configuration_id": "org.iso.18013.5.1.mDL",
+                  "type": "openid_credential"
+                }
+              ]
+            ]
+          },
+          "ttl_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttl Seconds",
+            "description": "TTL in seconds; falls back to server default",
+            "examples": [
+              600
+            ]
+          }
+        },
+        "type": "object",
+        "title": "PreAuthGrantIn",
+        "description": "Input for creating a pre-authorized code."
+      },
+      "PreAuthGrantOut": {
+        "properties": {
+          "pre_authorized_code": {
+            "type": "string",
+            "title": "Pre Authorized Code"
+          },
+          "tx_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tx Code"
+          },
+          "subject_id": {
+            "type": "string",
+            "title": "Subject Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pre_authorized_code",
+          "subject_id"
+        ],
+        "title": "PreAuthGrantOut",
+        "description": "Output for creating a pre-authorized code."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBasic": {
+        "type": "http",
+        "scheme": "basic"
+      },
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}

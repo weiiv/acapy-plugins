@@ -122,7 +122,7 @@ async def test_get_tenant_jwks_filters_keys(monkeypatch):
     def _import_key(jwk):
         return SimpleNamespace(as_dict=lambda **kwargs: {**jwk, **kwargs})
 
-    monkeypatch.setattr(internal_service.JsonWebKey, "import_key", _import_key)
+    monkeypatch.setattr(internal_service.jwk, "import_key", _import_key)
 
     session = cast(AsyncSession, DummySession(DummyListResult(rows)))
 

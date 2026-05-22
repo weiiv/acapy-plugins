@@ -1,10 +1,10 @@
-"""Application configuration."""
+"""Tenant settings."""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application configuration."""
+    """Tenant env vars (TENANT_ prefix)."""
 
     model_config = SettingsConfigDict(env_prefix="TENANT_", extra="ignore")
 
@@ -18,16 +18,13 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_TTL: int = 900
     REFRESH_TOKEN_TTL: int = 604800
     PRE_AUTH_CODE_TTL: int = 600
+    MAX_TX_CODE_ATTEMPTS: int = 3
     TOKEN_BYTES: int = 48
     INCLUDE_NONCE: bool = True
     NONCE_BYTES: int = 16
 
     ATTESTATION_REQUIRED_PRE_AUTH: bool = False
     ATTESTATION_REQUIRED_REFRESH: bool = False
-    ATTESTATION_TRUST_POLICY: str = "auto_trust"
-    ATTESTATION_ALLOW_LIST: list[str] = []
-    ATTESTATION_DENY_LIST: list[str] = []
-    ATTESTATION_BIND_DPOP_JKT: bool = False
     ATTESTATION_CLOCK_SKEW_SECONDS: int = 60
 
     DB_DRIVER_ASYNC: str = "postgresql+asyncpg"
@@ -38,7 +35,7 @@ class Settings(BaseSettings):
     TRUSTED_NETWORKS: list[str] = []
 
     INTERNAL_BASE_URL: str = "http://localhost:9000"
-    INTERNAL_AUTH_TOKEN: str = "admin-internal-auth-token"
+    INTERNAL_AUTH_TOKEN: str = ""
     CONTEXT_CACHE_TTL: int = 900
     WELL_KNOWN_CACHE_TTL: int = 300
 
@@ -46,7 +43,7 @@ class Settings(BaseSettings):
     KEY_ENC_VERSION: int = 1
 
     # CORS settings
-    CORS_ALLOW_ORIGINS: list[str] = ["*"]
+    CORS_ALLOW_ORIGINS: list[str] = []
     CORS_ALLOW_METHODS: list[str] = ["GET", "POST", "OPTIONS"]
     CORS_ALLOW_HEADERS: list[str] = ["Authorization", "Content-Type"]
     CORS_ALLOW_CREDENTIALS: bool = False

@@ -3,17 +3,56 @@
 from typing import Dict, List
 from datetime import datetime, timezone, timedelta
 
-from authlib.jose import JsonWebKey
+from joserfc import jwk
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from admin.config import settings
-from admin.models import Tenant, TenantKey
+from admin.models import Tenant, TenantKey, WalletProvider
 from admin.utils.db_utils import resolve_tenant_urls
 from admin.utils.keys import is_time_valid
+from core.security.jwks_cache import JWKSCache
+from core.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 MAX_TTL_SECONDS = 3600
+
+# Cache for wallet provider JWKS (keyed by iss)
+_provider_jwks_cache = JWKSCache(ttl=300)
+
+
+async def load_wallet_providers(session: AsyncSession) -> None:
+    """Load all active wallet providers into the JWKS cache (startup)."""
+    rows = (
+        await session.execute(
+            select(WalletProvider).where(
+                WalletProvider.active.is_(True)
+            )
+        )
+    ).scalars().all()
+    for row in rows:
+        _provider_jwks_cache.put(
+            row.iss,
+            row.jwks,
+            jwks_uri=row.jwks_uri,
+        )
+    logger.info("Loaded %d wallet providers into cache", len(rows))
+
+
+def refresh_provider_cache(
+    iss: str, jwks: dict | None, jwks_uri: str | None
+) -> None:
+    """Refresh a single provider's cache entry (called after create/update)."""
+    _provider_jwks_cache.put(
+        iss, jwks, jwks_uri=jwks_uri
+    )
+
+
+def invalidate_provider_cache(iss: str) -> None:
+    """Remove a provider from cache (called after delete/deactivate)."""
+    _provider_jwks_cache.invalidate(iss)
 
 
 async def get_tenant_db(session: AsyncSession, uid: str) -> Dict[str, str]:
@@ -60,8 +99,22 @@ async def get_tenant_jwks(session: AsyncSession, uid: str) -> Dict[str, List[dic
     for row in rows:
         if not row.public_jwk or not _include(row):
             continue
-        jwk_obj = JsonWebKey.import_key(row.public_jwk)
-        jwk_dict = jwk_obj.as_dict(is_private=False, kid=row.kid, alg=row.alg, use="sig")
+        jwk_obj = jwk.import_key(row.public_jwk)
+        jwk_dict = jwk_obj.as_dict(private=False, kid=row.kid, alg=row.alg, use="sig")
         if jwk_dict is not None:
             keys.append(jwk_dict)
     return {"keys": keys}
+
+
+async def lookup_wallet_provider(iss: str, kid: str) -> dict | None:
+    """Look up a wallet provider key by iss + kid from the in-memory cache.
+
+    For jwks_uri providers, refreshes from the URI on kid miss.
+    For inline jwks providers, returns None on kid miss.
+    """
+    key = await _provider_jwks_cache.get_key(iss, kid)
+    if key:
+        return {"iss": iss, "public_key": key.as_dict(private=False)}
+
+    logger.info("kid %r not found for provider %s", kid, iss)
+    return None

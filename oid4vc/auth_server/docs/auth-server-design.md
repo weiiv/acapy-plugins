@@ -13,7 +13,7 @@ This system supports **secure, standards-aligned issuance of Verifiable Credenti
 - 🔐 **Pre-Authorized Code Flow** – Enables issuance without user login
 - 🛡️ **DPoP-bound Access Tokens** – Proof-of-possession enforcement ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html))
 - 📄 **Authorization Details** – Credential-specific authorization rules ([RFC 9396](https://www.rfc-editor.org/rfc/rfc9396.html))
-- 🧾 **Attestation PoP** – Wallet Provider signs an attestation JWT (`kid`-based); the Authorization Server verifies it against a managed allow list of trusted providers
+- 🧾 **Attestation PoP** – Wallet Provider signs an attestation JWT (`kid`-based); Wallet Instance signs an attestation PoP JWT; the Authorization Server verifies both against a managed allow list of trusted providers
 - 🔁 **Refresh Token Rotation** – Mitigates token reuse and supports long-lived sessions
 - 🧠 **Token Introspection** – Fine-grained validation with embedded credential metadata
 - 🌐 **Metadata Discovery** – Standards-based wallet interoperability via `.well-known` endpoints
@@ -84,7 +84,7 @@ The system supports multi-tenancy for data isolation in OID4VCI workflows. The C
 | 3   | Refresh Token issued         | Auth Server          | Every access token comes with a refresh token.           |
 | 4   | Refresh Token rotation       | Auth Server          | One-time-use refresh tokens; replaced with each request. |
 | 5   | Decoupled authorization      | Auth Server + Config | Tokens validated externally or by config-swappable AS.   |
-| 6   | Attestation verification     | Authorization Server | Verify `client_attestation` PoP JWT at `/token`          |
+| 6   | Attestation verification     | Authorization Server | Verify attestation JWT + attestation PoP JWT at `/token`  |
 | 7   | `/nonce` endpoint            | Credential Issuer    | Required by OID4VCI; prevents nonce reuse.               |
 
 ---
@@ -153,10 +153,10 @@ sequenceDiagram
   CredentialIssuer-->>Wallet: credential_offer_uri
 
   Wallet->>AuthorizationServer: POST /token
-  Note over Wallet, AuthorizationServer: Includes:<br/>- pre-authorized_code<br/>- DPoP JWT<br/>- client_attestation PoP JWT
+  Note over Wallet, AuthorizationServer: Includes:<br/>- pre-authorized_code<br/>- Header: OAuth-Client-Attestation<br/>- Header: OAuth-Client-Attestation-PoP
   alt Valid `/token` request
-    AuthorizationServer->>AuthorizationServer: Validate DPoP + Attestation (kid lookup in allow list)
-    AuthorizationServer->>DB: Store access_token (with cnf.jkt, amr, attestation metadata) + refresh_token
+    AuthorizationServer->>AuthorizationServer: Validate Attestation (kid lookup in allow list)
+    AuthorizationServer->>DB: Store access_token (with amr, attestation metadata) + refresh_token
     AuthorizationServer-->>Wallet: access_token, refresh_token
   else Invalid
     AuthorizationServer-->>Wallet: HTTP 400/401
@@ -166,9 +166,9 @@ sequenceDiagram
   CredentialIssuer-->>Wallet: nonce
 
   Wallet->>CredentialIssuer: POST /credential
-  Note over Wallet, CredentialIssuer: Includes:<br/>- access_token<br/>- DPoP JWT<br/>- credential proof (with /nonce)
+  Note over Wallet, CredentialIssuer: Includes:<br/>- access_token<br/>- credential proof (with /nonce)
   CredentialIssuer->>AuthorizationServer: POST /introspect
-  AuthorizationServer->>DB: Validate token, return cnf.jkt, amr, attestation metadata
+  AuthorizationServer->>DB: Validate token, return amr, attestation metadata
   CredentialIssuer-->>Wallet: Verifiable Credential
 ```
 
@@ -200,17 +200,16 @@ sequenceDiagram
 
 | Component            | Validates                                                                                                                                  |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Authorization Server | Pre-auth code; **DPoP JWT** (proof-of-possession); **Attestation JWT** (verified via `kid` + allow list); refresh token rotation (validated for `used=false`) |
-| Credential Issuer    | Introspection (active token, realm match); **DPoP match (`cnf.jkt`)**; Nonce proof                                                         |
+| Authorization Server | Pre-auth code; **Attestation JWT** (verified via `kid` + allow list); **Attestation PoP JWT** (wallet instance proof); refresh token rotation (validated for `used=false`) |
+| Credential Issuer    | Introspection (active token, realm match); Nonce proof                                                         |
 
 ---
 
 ### 📦 Notes
 
 - Attestation JWT is verified by the Authorization Server at `/token` using `kid` + `iss` lookup against the allow list of trusted Wallet Providers.
-- DPoP `jkt` thumbprint is stored in `access_token.cnf_jkt`, and enforced by both the AS (at `/token`) and Issuer (at `/credential`).
-- The attestation `cnf.jwk` thumbprint must match the DPoP proof thumbprint, binding provider attestation to key possession.
-- The Issuer uses `/introspect` to validate the access token and retrieve embedded claims (e.g., `cnf.jkt`, `amr`, and `attestation` metadata), then performs its own DPoP check.
+- The attestation `cnf.jwk` contains the wallet instance's public key. The `OAuth-Client-Attestation-PoP` JWT proves the wallet holds the corresponding private key.
+- The Issuer uses `/introspect` to validate the access token and retrieve embedded claims (e.g., `amr` and `attestation` metadata).
 - Wallets **do not** send attestation to `/credential`; it’s only relevant at `/token`.
 
 ---
@@ -223,38 +222,56 @@ sequenceDiagram
 
 1. **Attestation JWT (signed by Wallet Provider)**
 
-   - Wallet Provider signs the JWT with their private key. Header contains `kid` (key identifier), payload contains `iss`, `sub`, `cnf.jwk`, `iat`, `exp`.
-   - The `cnf.jwk` contains the wallet instance's public key, binding the attestation to the wallet's DPoP key.
+   - Wallet Provider signs the JWT with their private key.
+   - Header: `typ` (`oauth-client-attestation+jwt`), `alg`, `kid`.
+   - Payload: `iss` (Wallet Provider identifier), `sub` (client_id — see note below), `cnf.jwk`, `iat`, `exp`.
+   - The `cnf.jwk` contains the wallet instance's public key, binding the attestation to the wallet instance.
+   - Sent via the `OAuth-Client-Attestation` HTTP header.
+   - **`sub` claim semantics (OID4VCI §15.4.4):** The `sub` value SHOULD identify the **wallet type** (e.g., `https://wallet.example.org`), NOT a unique per-instance identifier. All wallet instances of the same Wallet Provider share the same `sub` value to prevent cross-Authorization-Server correlation of individual users.
 
-2. **Allow List (Trusted Wallet Providers)**
+2. **Attestation PoP JWT (signed by Wallet Instance)**
 
-   - Admin registers trusted providers via API: `iss` + `kid` + public key (JWK).
+   - Wallet Instance signs a proof-of-possession JWT with the private key corresponding to the `cnf.jwk` in the attestation.
+   - Header: `typ` (`oauth-client-attestation-pop+jwt`), `alg`.
+   - Payload: `iss` (client_id — MUST match `sub` of the attestation JWT), `aud` (Authorization Server issuer identifier), `jti` (unique identifier for replay detection), `iat`, and optionally `challenge` (server-provided).
+   - Proves the wallet holds the attested key.
+   - Sent via the `OAuth-Client-Attestation-PoP` HTTP header.
+
+3. **Allow List (Trusted Wallet Providers)**
+
+   - Admin registers trusted providers via API: `iss` + JWKS document (inline `jwks`) or `jwks_uri`.
+   - Each provider row stores the full keyset; individual keys are resolved by `kid` at verification time.
    - Provider keys are obtained out-of-band (e.g., published on wallet provider's website).
+   - If `jwks_uri` is provided, keys are fetched on-demand with SSRF protection and LRU caching.
    - This is a closed ecosystem — no DID resolution or discoverability needed.
 
-3. **Verification (Authorization Server)**
+4. **Verification (Authorization Server)**
 
    - Extract `kid` from header and `iss` from payload.
    - Look up the provider's public key by `iss` + `kid` in the allow list.
-   - Verify signature using the provider's public key.
+   - Verify attestation JWT signature using the provider's public key.
    - Validate claims (`iss`, `sub`, `iat`, `exp`) and time validity (± clock skew).
-   - Compute thumbprint of `cnf.jwk` and verify it matches the DPoP proof thumbprint (binds attestation to possession).
+   - Extract `cnf.jwk` and verify the `OAuth-Client-Attestation-PoP` JWT signature against it (proves wallet instance holds the attested key).
 
-4. **Outcome**
-   - If `iss` + `kid` not found → `invalid_attestation` (untrusted provider).
-   - If signature or claims invalid → `invalid_attestation`.
-   - On success, record outcome in `ACCESS_TOKEN.metadata` and add `"att-pop"` to `amr`.
+5. **Outcome**
+   - If `iss` + `kid` not found → `invalid_client_attestation` (untrusted provider).
+   - If signature or claims invalid → `invalid_client_attestation`.
+   - On success:
+     - Compute `cnf_jkt = thumbprint(cnf.jwk)` (RFC 7638) and store on `ACCESS_TOKEN.cnf_jkt`.
+     - Record attestation metadata (iss, kid, sub, cnf_jkt, pop_jti, iat, exp) in `ACCESS_TOKEN.metadata`.
+     - Add `"att-pop"` to `amr`.
+   - On refresh without new attestation headers, the previous token's attestation metadata and `cnf_jkt` are carried forward to the new access token.
 
 ### Example `/token` Request (with Attestation PoP)
 
 ```http
 POST /token
 Content-Type: application/x-www-form-urlencoded
-DPoP: <signed DPoP JWT>
+OAuth-Client-Attestation: <attestation JWT signed by Wallet Provider>
+OAuth-Client-Attestation-PoP: <attestation PoP JWT signed by Wallet Instance>
 
 grant_type=urn:ietf:params:oauth:grant-type:pre-authorized_code&
-pre-authorized_code=abc123&
-client_attestation=eyJhbGciOiJSUzI1NiIs...
+pre-authorized_code=abc123
 ```
 
 ```mermaid
@@ -265,55 +282,39 @@ sequenceDiagram
   participant Issuer as Credential Issuer
   participant DB
 
-  Note over WalletProvider,Wallet: Wallet Attestation Provisioning
-
-  Wallet->>WalletProvider: Request attestation (app identity + device proof)
-  WalletProvider->>WalletProvider: Verify app integrity & platform attestation
-  WalletProvider->>WalletProvider: Sign attestation JWT with provider key (kid: "11")
-  Note over WalletProvider: Header: { alg, typ, kid }<br/>Payload: { iss, sub, cnf.jwk, iat, exp }
-  WalletProvider-->>Wallet: Attestation PoP JWT
-  Note over Wallet: Wallet caches attestation JWT<br/>(valid until exp)
-
-  Note over WalletProvider,AuthServer: Admin: Register Trusted Wallet Providers
+  Note over WalletProvider,AuthServer: 1. Admin: Register Trusted Wallet Providers (prerequisite)
 
   WalletProvider-->>AuthServer: Out-of-band: publish public key(s)
-  Note over AuthServer: Admin registers via API:<br/>iss + kid + public key (JWK)<br/>stored in allow list table
+  Note over AuthServer: Admin registers via API:<br/>iss + JWKS (or jwks_uri)<br/>stored in allow list table
 
-  Note over Wallet,AuthServer: Token Request with Attestation
+  Note over WalletProvider,Wallet: 2. Wallet Attestation Provisioning
 
-  Wallet->>AuthServer: POST /token
-  Note over Wallet,AuthServer: Form body includes:<br/>• grant_type + pre-authorized_code<br/>• client_attestation = <attestation PoP JWT><br/>Header: DPoP = <DPoP proof JWT>
+  Wallet->>WalletProvider: Request attestation (app identity + device proof)
+  WalletProvider->>WalletProvider: Verify integrity, sign attestation JWT (kid: "11")
+  WalletProvider-->>Wallet: Attestation JWT
+  Note over Wallet: Wallet caches attestation JWT<br/>(valid until exp, reusable across requests)
 
-  AuthServer->>AuthServer: 1. Decode attestation JWT header & payload
-  AuthServer->>AuthServer: 2. Extract kid from header, iss from payload
-  AuthServer->>DB: 3. Look up public key by iss + kid in allow list
+  Note over Wallet,AuthServer: 3. Token Request with Attestation
 
-  alt iss + kid found in allow list
-    DB-->>AuthServer: Wallet Provider public key (JWK)
-    AuthServer->>AuthServer: 4. Verify signature using provider's public key
-    AuthServer->>AuthServer: 5. Validate claims (iss, sub, iat, exp)
-    AuthServer->>AuthServer: 6. Check time validity (iat/exp ± clock skew)
-    AuthServer->>AuthServer: 7. Compute thumbprint of cnf.jwk, verify matches DPoP JKT
+  Wallet->>Wallet: Generate Attestation PoP JWT (signed with cnf.jwk key)
+  Wallet->>AuthServer: POST /token + OAuth-Client-Attestation + OAuth-Client-Attestation-PoP
 
-    alt Attestation valid
-      AuthServer->>DB: Store access_token with attestation metadata + amr: ["att-pop"]
-      AuthServer-->>Wallet: 200 access_token, refresh_token
-    else Signature or claims invalid
-      AuthServer-->>Wallet: 400 invalid_attestation
-    end
+  AuthServer->>DB: Look up provider key by iss + kid
+  AuthServer->>AuthServer: Validate attestation + PoP
 
-  else iss + kid not found
-    DB-->>AuthServer: No match
-    AuthServer-->>Wallet: 400 invalid_attestation (untrusted provider)
+  alt Attestation valid
+    AuthServer->>DB: Store access_token with attestation metadata + amr: ["att-pop"]
+    AuthServer-->>Wallet: 200 access_token, refresh_token
+  else Invalid or untrusted
+    AuthServer-->>Wallet: 400 invalid_client_attestation (untrusted provider)
   end
 
   Note over Wallet,AuthServer: Credential Request & Introspection
 
-  Wallet->>Issuer: POST /credential (Bearer access_token + DPoP)
+  Wallet->>Issuer: POST /credential (Bearer access_token)
   Issuer->>AuthServer: POST /introspect (token)
   AuthServer->>DB: Look up access_token + metadata
-  AuthServer-->>Issuer: active: true, cnf.jkt, amr, attestation metadata
-  Issuer->>Issuer: Verify DPoP proof matches cnf.jkt
+  AuthServer-->>Issuer: active: true, amr, attestation metadata
   Issuer->>Issuer: Check attestation metadata from introspection (optional policy)
   Issuer-->>Wallet: Verifiable Credential
 ```
@@ -324,13 +325,64 @@ sequenceDiagram
 
 ### ✅ Overview
 
-DPoP ensures that access tokens are bound to a client’s private key, preventing unauthorized use of stolen tokens (RFC 9449).
+DPoP ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html)) binds access tokens to a client's asymmetric key pair, preventing unauthorized use of stolen tokens. Even if an attacker exfiltrates an access token, they cannot use it without the corresponding private key.
 
 ### ✅ Support
 
-- **Required for `/token` and `/credential`**.
-- Access tokens include a `cnf.jkt` claim (JWK Thumbprint) binding the token to the client’s DPoP key.
-- Replay protection via `jti` on DPoP JWTs.
+- **Required at `/token`** (Authorization Server) and **`/credential`** (Credential Issuer).
+- Access tokens are issued with `"token_type": "DPoP"` (not `"Bearer"`).
+- Access tokens include a `cnf.jkt` claim (JWK Thumbprint per [RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html)) binding the token to the client's DPoP key.
+- Replay protection via `jti` claim on DPoP proof JWTs, tracked in `JTI_SEEN`.
+- Server-provided nonce support via `DPoP-Nonce` response header and `use_dpop_nonce` error.
+
+### 🔑 DPoP Key vs. Attestation Key
+
+DPoP and Client Attestation are **independent mechanisms** that serve different purposes:
+
+| Mechanism | Purpose | Key |
+|-----------|---------|-----|
+| Client Attestation | Proves the client is a legitimate wallet instance | `cnf.jwk` in attestation JWT |
+| DPoP | Binds the access token to the client, preventing token theft | DPoP key pair (in `DPoP` header `jwk`) |
+
+The wallet MAY use the **same key** for both (the attestation `cnf.jwk` private key also signs DPoP proofs), or it MAY use separate keys. The Authorization Server does not enforce a relationship between them — they are validated independently.
+
+### 🧬 DPoP Proof JWT Structure
+
+Each DPoP proof is a JWT with:
+
+**Header:**
+```json
+{
+  "typ": "dpop+jwt",
+  "alg": "ES256",
+  "jwk": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." }
+}
+```
+
+**Payload (at `/token`):**
+```json
+{
+  "jti": "unique-id-per-request",
+  "htm": "POST",
+  "htu": "https://auth.example.com/tenants/{tenant-id}/token",
+  "iat": 1721028000,
+  "nonce": "server-provided-nonce"
+}
+```
+
+**Payload (at `/credential` — resource server):**
+```json
+{
+  "jti": "unique-id-per-request",
+  "htm": "POST",
+  "htu": "https://issuer.example.com/credential",
+  "iat": 1721028000,
+  "ath": "fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo",
+  "nonce": "server-provided-nonce"
+}
+```
+
+The `ath` claim is the base64url-encoded SHA-256 hash of the access token — required when the DPoP proof accompanies a token at a resource server (RFC 9449 §4.2).
 
 ### 🧬 Token Binding Flow with DPoP
 
@@ -339,19 +391,87 @@ sequenceDiagram
   participant Wallet
   participant AuthServer as Authorization Server
   participant Issuer as Credential Issuer
-  Wallet->>AuthServer: POST /token + DPoP JWT + Attestation PoP
-  AuthServer-->>Wallet: access_token (with cnf.jkt, amr) + refresh_token
-  Wallet->>Issuer: POST /credential + DPoP JWT
+
+  Note over Wallet: Generate DPoP key pair (once per session)
+
+  Wallet->>AuthServer: POST /token + DPoP header (htm=POST, htu=/token)
+  Note over AuthServer: Validate DPoP proof:<br/>typ, alg, jwk, htm, htu, jti, iat, nonce
+  AuthServer->>AuthServer: Derive cnf.jkt = thumbprint(proof.jwk)
+  AuthServer-->>Wallet: token_type: "DPoP", access_token (cnf.jkt bound), refresh_token
+
+  Note over Wallet: Generate fresh DPoP proof for /credential<br/>(same key, new jti, ath = hash(access_token))
+
+  Wallet->>Issuer: POST /credential + DPoP header (htm=POST, htu=/credential, ath)
+  Issuer->>AuthServer: POST /introspect (token)
+  AuthServer-->>Issuer: active: true, cnf.jkt: "..."
+  Note over Issuer: Validate DPoP proof + verify<br/>thumbprint(proof.jwk) == cnf.jkt from introspection
   Issuer-->>Wallet: Verifiable Credential
 ```
 
-### 🛠️ Implementation Steps
+### 🔄 Nonce Flow (Optional Server-Enforced)
 
-1. Client generates DPoP key pair (public JWK appears in `DPoP` header).
-2. Client sends DPoP header with `/token`.
-3. Auth Server validates signature, `htu`/`htm`, and `jti` uniqueness; derives `cnf.jkt`.
-4. Issued access token contains `cnf.jkt`.
-5. Issuer enforces DPoP on `/credential` by matching request DPoP proof to `cnf.jkt`.
+The Authorization Server MAY require a nonce in DPoP proofs to limit proof reuse windows:
+
+```mermaid
+sequenceDiagram
+  participant Wallet
+  participant AuthServer as Authorization Server
+
+  Wallet->>AuthServer: POST /token + DPoP (no nonce)
+  AuthServer-->>Wallet: 400 use_dpop_nonce + DPoP-Nonce: "server-nonce-1"
+  Wallet->>AuthServer: POST /token + DPoP (nonce: "server-nonce-1")
+  AuthServer-->>Wallet: 200 access_token + DPoP-Nonce: "server-nonce-2"
+  Note over Wallet: Cache nonce for next request to this server
+```
+
+### 🛠️ Authorization Server Validation (RFC 9449 §4.3)
+
+When the `DPoP` header is present at `/token`, the Authorization Server MUST:
+
+1. Verify exactly one `DPoP` header is present.
+2. Decode and validate the JWT structure.
+3. Verify `typ` header is `dpop+jwt`.
+4. Verify `alg` is a supported asymmetric algorithm (e.g., `ES256`) and not `none`.
+5. Verify the JWT signature using the public key in the `jwk` header.
+6. Verify `jwk` does not contain a private key.
+7. Verify `htm` matches the HTTP method (`POST`).
+8. Verify `htu` matches the request URI (scheme + authority + path, no query/fragment).
+9. If nonce is required, verify the `nonce` claim matches the server-provided value.
+10. Verify `iat` is within an acceptable time window.
+11. Verify `jti` has not been seen before (replay prevention via `JTI_SEEN` table).
+12. Derive `cnf.jkt` = base64url(SHA-256(canonicalized JWK)) and store on the access token.
+
+### 🛠️ Credential Issuer Validation
+
+When the wallet presents a DPoP-bound token at `/credential`, the Credential Issuer MUST:
+
+1. Validate the DPoP proof (steps 1–11 above, with `htu` = credential endpoint URL).
+2. Verify the `ath` claim equals base64url(SHA-256(access_token)).
+3. Call `/introspect` to get the token's `cnf.jkt`.
+4. Verify `thumbprint(proof.jwk) == cnf.jkt` (key binding check).
+
+### 📦 Storage & Metadata
+
+- `ACCESS_TOKEN.cnf_jkt`: Stores the DPoP key thumbprint bound to the token.
+- `JTI_SEEN.metadata`: For DPoP proofs, stores `{"htm": "POST", "htu": "...", "cnf_jkt": "..."}`.
+- DPoP nonces: Stored server-side with time-based rotation (configurable window).
+
+### 🔒 Error Responses
+
+| Error | HTTP Status | When |
+|-------|-------------|------|
+| `invalid_dpop_proof` | 400 | Malformed proof, bad signature, wrong `htm`/`htu`, expired `iat`, unknown `alg` |
+| `use_dpop_nonce` | 400 | Server requires nonce but none provided, or nonce is stale (includes `DPoP-Nonce` header) |
+| `invalid_token` | 401 | DPoP key thumbprint doesn't match `cnf.jkt` on the token (at resource server) |
+
+### 📝 `.well-known` Discovery
+
+The Authorization Server metadata SHOULD include:
+```json
+{
+  "dpop_signing_alg_values_supported": ["ES256"]
+}
+```
 
 ---
 
@@ -384,13 +504,13 @@ sequenceDiagram
     Wallet->>CredentialIssuer: GET /.well-known/openid-credential-issuer
     CredentialIssuer-->>Wallet: Metadata (token/credential endpoints)
 
-    Wallet->>AuthServer: POST /token (pre-auth-code + DPoP + attestation PoP)
-    AuthServer->>DB: Validate + bind DPoP + verify attestation (kid lookup)
+    Wallet->>AuthServer: POST /token (pre-auth-code + attestation PoP headers)
+    AuthServer->>DB: Validate + verify attestation (kid lookup)
     AuthServer-->>Wallet: access_token + refresh_token
 
-    Wallet->>CredentialIssuer: POST /credential + DPoP
+    Wallet->>CredentialIssuer: POST /credential
     CredentialIssuer->>AuthServer: POST /introspect
-    AuthServer-->>CredentialIssuer: token is active + authorization_details + cnf.jkt + amr/attestation
+    AuthServer-->>CredentialIssuer: token is active + authorization_details + amr/attestation
     CredentialIssuer-->>Wallet: Verifiable Credential
 ```
 
@@ -437,9 +557,9 @@ sequenceDiagram
 
 | Endpoint                            | Method | Auth                                      | Description                          |
 | ----------------------------------- | ------ | ----------------------------------------- | ------------------------------------ |
-| `/token`                            | POST   | DPoP + optional attestation PoP           | Token exchange (pre-auth or refresh) |
-| `/introspect`                       | POST   | private_key_jwt \| client_secret_basic \| shared_bearer | Token validation + attestation       |
-| `/grants/pre-authorized-code`       | POST   | private_key_jwt \| client_secret_basic \| shared_bearer | Issue a pre-authorized code grant.   |
+| `/token`                            | POST   | Optional attestation PoP (via headers)    | Token exchange (pre-auth or refresh) |
+| `/introspect`                       | POST   | private_key_jwt \| client_secret_basic | Token validation + attestation       |
+| `/grants/pre-authorized-code`       | POST   | private_key_jwt \| client_secret_basic | Issue a pre-authorized code grant.   |
 | `/.well-known/openid-configuration` | GET    | None                                      | Auth Server metadata discovery       |
 
 ### Credential Issuer
@@ -447,7 +567,7 @@ sequenceDiagram
 | Endpoint                                | Method | Auth          | Description                      |
 | --------------------------------------- | ------ | ------------- | -------------------------------- |
 | `/credential_offer`                     | GET    | None          | Offer URI with pre-auth code     |
-| `/credential`                           | POST   | Bearer + DPoP | Request VC                       |
+| `/credential`                           | POST   | Bearer | Request VC                       |
 | `/nonce`                                | GET    | None          | Nonce for credential proof       |
 | `/.well-known/openid-credential-issuer` | GET    | None          | OID4VC Issuer metadata discovery |
 
@@ -455,19 +575,19 @@ sequenceDiagram
 
 ### 🔐 `POST /token`
 
-Exchanges a pre-authorized code or refresh token for an access token (and new refresh token for rotation). If policy requires attestation PoP, the request must include `client_attestation`.
+Exchanges a pre-authorized code or refresh token for an access token (and new refresh token for rotation). If policy requires attestation PoP, the request must include `OAuth-Client-Attestation` and `OAuth-Client-Attestation-PoP` headers.
 
 **Request**
 
 ```http
 POST /token
 Content-Type: application/x-www-form-urlencoded
-DPoP: <signed DPoP JWT>
+OAuth-Client-Attestation: <attestation JWT signed by Wallet Provider>
+OAuth-Client-Attestation-PoP: <attestation PoP JWT signed by Wallet Instance>
 
 grant_type=urn:ietf:params:oauth:grant-type:pre-authorized_code&
 pre-authorized_code=abc123&
-tx_code=1234&
-client_attestation=eyJhbGciOiJSUzI1NiIs...
+tx_code=1234
 ```
 
 **Response**
@@ -486,14 +606,13 @@ client_attestation=eyJhbGciOiJSUzI1NiIs...
       "types": ["VerifiableCredential", "OntarioBusinessCard"]
     }
   ],
-  "cnf": { "jkt": "base64url-encoded-thumbprint" },
-  "amr": ["dpop", "att-pop"]
+  "amr": ["att-pop"]
 }
 ```
 
 **Errors**
 
-- HTTP 400 `invalid_request`: Invalid pre-authorized code, DPoP JWT, malformed attestation PoP.
+- HTTP 400 `invalid_request`: Invalid pre-authorized code, malformed attestation PoP.
 - HTTP 401 `invalid_token`: Invalid or revoked refresh token.
 - HTTP 401 `invalid_attestation`: Attestation PoP required by policy but missing or failed verification.
 
@@ -535,7 +654,7 @@ token_type_hint=access_token
   "cnf": { "jkt": "QmFzZTY0ZW5jb2RlZFRodW1icHJpbnQ=" },
   "iss": "https://auth.example.com",
   "realm": "tenant1",
-  "amr": ["dpop", "att-pop"],
+  "amr": ["att-pop"],
   "attestation": {
     "present": true,
     "verified": true,
@@ -543,6 +662,7 @@ token_type_hint=access_token
     "kid": "11",
     "sub": "https://wallet.example.org",
     "cnf_jkt": "QmFzZTY0ZW5jb2RlZFRodW1icHJpbnQ=",
+    "pop_jti": "unique-pop-jti-value",
     "iat": 1721028000,
     "exp": 1721031600
   }
@@ -565,7 +685,6 @@ Request a credential using an access token. (No attestation here; enforced at `/
 ```http
 POST /credential
 Authorization: Bearer eyJhbGciOi...
-DPoP: <signed DPoP JWT>
 Content-Type: application/json
 
 {
@@ -586,7 +705,7 @@ Content-Type: application/json
 
 **Errors**
 
-- HTTP 400 `invalid_request`: Invalid access token, DPoP JWT, or nonce proof.
+- HTTP 400 `invalid_request`: Invalid access token or nonce proof.
 
 ---
 
@@ -700,7 +819,7 @@ GET /.well-known/openid-configuration
 {
   "issuer": "https://auth.example.com",
   "token_endpoint": "https://auth.example.com/token",
-  "token_endpoint_auth_methods_supported": ["none"],
+  "token_endpoint_auth_methods_supported": ["private_key_jwt", "client_secret_basic"],
   "grant_types_supported": [
     "urn:ietf:params:oauth:grant-type:pre-authorized_code",
     "refresh_token"
@@ -714,9 +833,9 @@ GET /.well-known/openid-configuration
 ### 🔍 Error Handling
 
 - Standard OAuth2 errors: `invalid_token`, `expired_token`, `invalid_grant`, etc.
-- DPoP errors: `invalid_dpop_proof`, `replay_detected`.
+- DPoP errors (planned): `invalid_dpop_proof`, `replay_detected`.
 - Nonce errors: `invalid_request` for invalid/expired nonces; `too_many_requests` for exceeding rate limits.
-- Attestation errors: `invalid_attestation` if `client_attestation` is missing/invalid, signature verification fails, or `iss` + `kid` not found in the allow list.
+- Attestation errors: `invalid_attestation` if attestation headers are missing/invalid, signature verification fails, Attestation-PoP verification fails, or `iss` + `kid` not found in the allow list.
 
 ---
 
@@ -735,7 +854,6 @@ erDiagram
     SUBJECT ||--o{ PRE_AUTH_CODE : issued
     SUBJECT ||--o{ ACCESS_TOKEN : manages
     SUBJECT ||--o{ REFRESH_TOKEN : manages
-    SUBJECT ||--o{ DPOP_JTI : manages
     CLIENT
 
     SUBJECT {
@@ -771,23 +889,12 @@ erDiagram
         INT id PK
         INT subject_id FK
         INT access_token_id FK
-        TEXT token UK
+        TEXT token_hash UK "SHA-256"
         TIMESTAMPTZ issued_at
         TIMESTAMPTZ expires_at
         BOOLEAN used
         BOOLEAN revoked
         JSONB metadata
-    }
-
-    DPOP_JTI {
-        INT id PK
-        INT subject_id FK
-        TEXT jti UK
-        TEXT htm
-        TEXT htu
-        TEXT cnf_jkt
-        TIMESTAMPTZ issued_at
-        TIMESTAMPTZ expires_at
     }
 
     NONCE {
@@ -812,13 +919,19 @@ erDiagram
 
     WALLET_PROVIDER {
         INT id PK
-        TEXT iss "INDEX"
-        TEXT kid "INDEX"
-        JSONB public_key "JWK format"
+        TEXT iss "UNIQUE INDEX"
+        JSONB jwks "Inline JWKS document (nullable)"
+        TEXT jwks_uri "Remote JWKS endpoint (nullable)"
         TEXT name
         BOOLEAN active
         TIMESTAMPTZ created_at
         TIMESTAMPTZ updated_at
+    }
+
+    JTI_SEEN {
+        TEXT jti PK
+        TIMESTAMPTZ expires_at
+        JSONB metadata "htm, htu, cnf_jkt for DPoP"
     }
 ```
 
@@ -834,14 +947,21 @@ erDiagram
 - **Token Format**: Access tokens are JWTs with claims (`aud`, `exp`, `cnf`, `amr`, etc.).
 - **DPoP Key Lifecycle**: Clients manage DPoP key pairs; rotate if compromised.
 - **CORS**: Restrict cross-origin requests where applicable.
+- **Refresh Token Hashing**: Refresh tokens are stored as SHA-256 hashes; raw values are never persisted.
+- **JTI Replay Prevention**: Client assertion, attestation PoP, and DPoP JTIs are tracked in `JTI_SEEN` (PostgreSQL INSERT ON CONFLICT). Entries persist until the JWT's `exp` claim for client assertions, or a fixed window for attestation PoPs and DPoP proofs. DPoP entries store `htm`, `htu`, and `cnf_jkt` in the `metadata` column.
+- **SSRF Protection**: `jwks_uri` fetches validate the scheme, resolve DNS hostnames, and reject private/loopback/link-local/reserved IP addresses before making HTTP requests.
+- **LRU-bounded Caches**: Tenant context cache, engine pools, and JWKS caches use `OrderedDict`-based LRU eviction to prevent unbounded memory growth.
+- **Migration Safety**: Downgrade operations via `POST /admin/tenants/{uid}/migrations` require explicit `confirm: true` in the request body.
+- **Proxy Trust**: `PROXY_TRUSTED_HOSTS` controls which reverse proxies are trusted to set `X-Forwarded-For` headers. Default: `127.0.0.1`. Set to the specific LB/proxy IP in production; never use `"*"`.
+- **Algorithm Enforcement**: JWT verification restricts accepted algorithms to the client's configured `client_auth_signing_alg` (or `ES256` default), preventing algorithm confusion attacks.
 
 ## 📘 Terminology
 
 - **JWT (JSON Web Token)**: A compact, signed token format (RFC 7519).
 - **JWK (JSON Web Key)**: JSON representation of a cryptographic key (RFC 7517).
 - **JKT (JWK Thumbprint)**: Base64url-encoded hash of a JWK (RFC 7638). Used in DPoP and in attestation `cnf.jwk` binding.
-- **JTI (JWT ID)**: Unique ID for a JWT, used for replay prevention in DPoP flows.
-- **DPoP**: Mechanism to bind access tokens to a client’s key (RFC 9449).
-- **Attestation PoP**: JWT signed by a trusted Wallet Provider (identified by `iss` + `kid`), verified by the Authorization Server against a managed allow list. Contains `cnf.jwk` binding the wallet instance's key.
+- **JTI (JWT ID)**: Unique ID for a JWT, used for replay prevention.
+- **DPoP**: Mechanism to bind access tokens to a client's key (RFC 9449). Independent from attestation.
+- **Attestation PoP**: Two-part client attestation mechanism. The `OAuth-Client-Attestation` header carries a JWT signed by a trusted Wallet Provider (identified by `iss` + `kid`), verified against a managed allow list. The `OAuth-Client-Attestation-PoP` header carries a JWT signed by the Wallet Instance, proving possession of the key in `cnf.jwk`.
 - **Pre-authorized Code**: One-time-use code issued by the AS to enable issuance without user login.
 - **Realm**: Logical identifier mapping a token to a specific tenant.
