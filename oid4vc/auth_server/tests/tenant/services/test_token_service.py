@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tenant.services import token_service
 
+_FAR_FUTURE = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
 
 class DummySession(AsyncSession):
     def __init__(self):
@@ -26,6 +28,8 @@ async def test_issue_by_pre_auth_code_excludes_realm_from_claims(monkeypatch):
     pac = SimpleNamespace(
         id=1,
         tx_code=None,
+        used=False,
+        expires_at=_FAR_FUTURE,
         subject=SimpleNamespace(uid="sub-123"),
         subject_id=10,
         authorization_details=[{"type": "openid_credential", "format": "mso_mdoc"}],
@@ -275,6 +279,8 @@ async def test_issue_by_pre_auth_code_includes_nonce_when_enabled(monkeypatch):
     pac = SimpleNamespace(
         id=5,
         tx_code=None,
+        used=False,
+        expires_at=_FAR_FUTURE,
         subject=SimpleNamespace(uid="sub-789"),
         subject_id=77,
         authorization_details=None,
