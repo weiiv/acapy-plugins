@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 from authlib.oauth2.rfc6749.errors import InvalidRequestError
 from joserfc import jwk, jwt
+from joserfc.jwk import KeySet
 from joserfc.jws import extract_compact
 
 from core.observability.observability import internal_api_headers
@@ -83,23 +84,34 @@ def _extract_cnf_jwk(claims: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-async def _lookup_provider_key(iss: str, kid: str) -> dict[str, Any] | None:
-    """Look up a resolved provider key from admin internal API by iss + kid."""
+async def _lookup_provider_key(
+    iss: str, kid: str | None = None
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    """Look up provider key(s) from admin internal API.
+
+    When *kid* is provided, returns a single JWK dict.
+    When *kid* is absent, returns a list of JWK dicts for trial verification.
+    """
     url = f"{settings.INTERNAL_BASE_URL}/wallet-providers/lookup"
     headers = internal_api_headers(settings.INTERNAL_AUTH_TOKEN)
+    params: dict[str, str] = {"iss": iss}
+    if kid:
+        params["kid"] = kid
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
-                url,
-                params={"iss": iss, "kid": kid},
-                headers=headers,
+                url, params=params, headers=headers
             )
             if resp.status_code != 200:
                 return None
             data = resp.json()
             if not data.get("found"):
                 return None
-            return data.get("public_key")
+            # Single key when kid was specified
+            if kid:
+                return data.get("public_key")
+            # All keys when kid was absent
+            return data.get("keys")
     except Exception:
         logger.warning(
             "Failed to look up provider key iss=%s kid=%s",
@@ -112,13 +124,16 @@ async def _lookup_provider_key(iss: str, kid: str) -> dict[str, Any] | None:
 
 def _verify_signature(
     token: str,
-    public_key_jwk: dict[str, Any],
+    public_key_jwk: dict[str, Any] | list[dict[str, Any]],
     *,
     error: str = "attestation_signature_invalid",
 ) -> dict[str, Any]:
-    """Verify JWT signature using the given JWK. Returns decoded claims."""
+    """Verify JWT signature. Accepts a single JWK or list for trial."""
     try:
-        key = jwk.import_key(public_key_jwk)
+        if isinstance(public_key_jwk, list):
+            key = KeySet.import_key_set({"keys": public_key_jwk})
+        else:
+            key = jwk.import_key(public_key_jwk)
         result = jwt.decode(token, key, algorithms=list(SUPPORTED_SIGNING_ALGS))
         return dict(result.claims)
     except InvalidAttestationError:
@@ -154,14 +169,14 @@ async def validate_client_attestation(
     if typ != "oauth-client-attestation+jwt":
         raise InvalidAttestationError(description="invalid_attestation_typ")
 
-    # 3. Extract kid from header, iss from payload
+    # 3. Extract kid from header (OPTIONAL per spec), iss from payload
     kid = header.get("kid")
-    if not isinstance(kid, str) or not kid:
-        raise InvalidAttestationError(description="missing_kid")
+    if kid is not None and not isinstance(kid, str):
+        raise InvalidAttestationError(description="invalid_kid")
     issuer = _required_claim_str(claims, "iss")
 
-    # 4. Look up provider public key by iss + kid (§9 step 5)
-    provider_key = await _lookup_provider_key(issuer, kid)
+    # 4. Look up provider key(s) by iss + optional kid (§9 step 5)
+    provider_key = await _lookup_provider_key(issuer, kid or None)
     if not provider_key:
         raise InvalidAttestationError(description="untrusted_provider")
 
@@ -172,19 +187,28 @@ async def validate_client_attestation(
     subject = _required_claim_str(verified_claims, "sub")
     issued_at = verified_claims.get("iat")
     expires_at = verified_claims.get("exp")
+    if not isinstance(expires_at, int):
+        raise InvalidAttestationError(description="missing_exp")
 
-    # 7. Check time validity (§9 step 11) — skip if iat/exp absent
+    # 7. Check time validity (§9 step 11)
     skew = int(settings.ATTESTATION_CLOCK_SKEW_SECONDS)
     now = _now_ts()
     if issued_at is not None and int(issued_at) > now + skew:
         raise InvalidAttestationError(description="attestation_not_yet_valid")
-    if expires_at is not None and int(expires_at) <= now - skew:
+    if int(expires_at) <= now - skew:
         raise InvalidAttestationError(description="attestation_expired")
+    nbf = verified_claims.get("nbf")
+    if isinstance(nbf, int) and nbf > now + skew:
+        raise InvalidAttestationError(description="attestation_not_yet_valid")
 
     # 8. Extract cnf.jwk — REQUIRED per §5.1
     cnf_jwk = _extract_cnf_jwk(verified_claims)
     if not cnf_jwk:
         raise InvalidAttestationError(description="missing_cnf_jwk")
+
+    # 8b. cnf key MUST NOT be a private key (§9 step 6)
+    if "d" in cnf_jwk:
+        raise InvalidAttestationError(description="cnf_contains_private_key")
 
     cnf_jkt = _thumbprint(cnf_jwk)
 
@@ -206,34 +230,31 @@ async def validate_client_attestation(
     )
 
     # 11. Verify PoP iss matches attestation sub (§5.2 rule 4, §9 step 13)
-    # TODO: re-enable once clients conform to spec
-    # pop_iss = pop_claims.get("iss")
-    # if pop_iss != subject:
-    #     raise InvalidAttestationError(description="attestation_pop_iss_mismatch")
+    pop_iss = pop_claims.get("iss")
+    if pop_iss != subject:
+        raise InvalidAttestationError(description="attestation_pop_iss_mismatch")
 
     # 12. Verify PoP aud (§5.2: REQUIRED, must be AS issuer identifier)
     pop_aud = pop_claims.get("aud")
     if not pop_aud:
         raise InvalidAttestationError(description="missing_attestation_pop_aud")
 
-    # 12b. Validate PoP aud value matches the expected AS issuer (§5.2, §9 step 9)
-    # TODO: re-enable once clients send full tenant-scoped aud
-    # if expected_audience:
-    #     aud_values = pop_aud if isinstance(pop_aud, list) else [pop_aud]
-    #     if expected_audience not in aud_values:
-    #         raise InvalidAttestationError(
-    #             description="attestation_pop_aud_mismatch"
-    #         )
+    # 12b. Validate PoP aud value matches the expected AS issuer (§5.2, §9 step 10)
+    if expected_audience:
+        aud_values = pop_aud if isinstance(pop_aud, list) else [pop_aud]
+        if expected_audience not in aud_values:
+            raise InvalidAttestationError(
+                description="attestation_pop_aud_mismatch"
+            )
 
     # 13. Verify PoP jti is present (§5.2: REQUIRED)
     pop_jti = pop_claims.get("jti")
     if not isinstance(pop_jti, str) or not pop_jti:
         raise InvalidAttestationError(description="missing_attestation_pop_jti")
 
-    # TODO: Re-enable once Ontario Wallet sends unique jti per request
-    # 13b. Check jti replay (§9 step 10: MUST verify jti not previously used)
-    # if not await _attest_pop_jti_cache.check_and_store(pop_jti, db):
-    #     raise InvalidAttestationError(description="attestation_pop_jti_replay")
+    # 13b. Check jti replay (§12.1: SHOULD detect replay via jti)
+    if not await _attest_pop_jti_cache.check_and_store(pop_jti, db):
+        raise InvalidAttestationError(description="attestation_pop_jti_replay")
 
     # 14. Verify PoP iat is present and within window (§5.2: REQUIRED)
     pop_iat = pop_claims.get("iat")
@@ -241,15 +262,18 @@ async def validate_client_attestation(
         raise InvalidAttestationError(description="missing_attestation_pop_iat")
     if pop_iat > now + skew:
         raise InvalidAttestationError(description="attestation_pop_not_yet_valid")
-    # TODO: Re-enable once Ontario Wallet sends fresh PoP iat
-    # if pop_iat < now - _JTI_WINDOW:
-    #     raise InvalidAttestationError(description="attestation_pop_too_old")
+    if pop_iat < now - _JTI_WINDOW:
+        raise InvalidAttestationError(description="attestation_pop_too_old")
 
-    # 15. Verify PoP exp if present (§5.2: OPTIONAL, but MUST reject if expired)
-    # TODO: Re-enable once Ontario Wallet sends valid exp
-    # pop_exp = pop_claims.get("exp")
-    # if isinstance(pop_exp, int) and pop_exp <= now - skew:
-    #     raise InvalidAttestationError(description="attestation_pop_expired")
+    # 15. Verify PoP nbf if present (RFC7519 via §5.2 rule 5)
+    pop_nbf = pop_claims.get("nbf")
+    if isinstance(pop_nbf, int) and pop_nbf > now + skew:
+        raise InvalidAttestationError(description="attestation_pop_not_yet_valid")
+
+    # 16. Verify PoP exp if present (RFC7519 via §5.2 rule 5)
+    pop_exp = pop_claims.get("exp")
+    if isinstance(pop_exp, int) and pop_exp <= now - skew:
+        raise InvalidAttestationError(description="attestation_pop_expired")
 
     return {
         "present": True,
