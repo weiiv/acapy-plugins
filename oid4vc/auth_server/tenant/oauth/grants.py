@@ -80,7 +80,7 @@ class PreAuthorizedCodeGrant(_BaseTenantGrant):
         self._code = str(code)
         self._tx_code = data.get("tx_code") or None
         self._attestation_meta = await self._validate_attestation(
-            required=settings.ATTESTATION_REQUIRED_PRE_AUTH
+            required=settings.ATTESTATION_REQUIRED
         )
 
     async def create_token_response(self):
@@ -129,7 +129,7 @@ class RotatingRefreshTokenGrant(_BaseTenantGrant):
             raise InvalidRequestError(description="missing refresh_token")
         self._refresh_token = str(refresh_token)
         self._attestation_meta = await self._validate_attestation(
-            required=settings.ATTESTATION_REQUIRED_REFRESH
+            required=settings.ATTESTATION_REQUIRED
         )
 
     async def create_token_response(self):
