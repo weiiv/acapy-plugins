@@ -229,17 +229,12 @@ async def validate_client_attestation(
         client_attestation_pop, cnf_jwk, error="attestation_pop_signature_invalid"
     )
 
-    # 11. Verify PoP iss matches attestation sub (§5.2 rule 4, §9 step 13)
-    pop_iss = pop_claims.get("iss")
-    if pop_iss != subject:
-        raise InvalidAttestationError(description="attestation_pop_iss_mismatch")
-
-    # 12. Verify PoP aud (§5.2: REQUIRED, must be AS issuer identifier)
+    # 11. Verify PoP aud (§5.2: REQUIRED, must be AS issuer identifier)
     pop_aud = pop_claims.get("aud")
     if not pop_aud:
         raise InvalidAttestationError(description="missing_attestation_pop_aud")
 
-    # 12b. Validate PoP aud value matches the expected AS issuer (§5.2, §9 step 10)
+    # 11b. Validate PoP aud value matches the expected AS issuer (§5.2, §8 step 10)
     if expected_audience:
         aud_values = pop_aud if isinstance(pop_aud, list) else [pop_aud]
         if expected_audience not in aud_values:
@@ -247,16 +242,16 @@ async def validate_client_attestation(
                 description="attestation_pop_aud_mismatch"
             )
 
-    # 13. Verify PoP jti is present (§5.2: REQUIRED)
+    # 12. Verify PoP jti is present (§5.2: REQUIRED)
     pop_jti = pop_claims.get("jti")
     if not isinstance(pop_jti, str) or not pop_jti:
         raise InvalidAttestationError(description="missing_attestation_pop_jti")
 
-    # 13b. Check jti replay (§12.1: SHOULD detect replay via jti)
+    # 12b. Check jti replay (§12.1: SHOULD detect replay via jti)
     if not await _attest_pop_jti_cache.check_and_store(pop_jti, db):
         raise InvalidAttestationError(description="attestation_pop_jti_replay")
 
-    # 14. Verify PoP iat is present and within window (§5.2: REQUIRED)
+    # 13. Verify PoP iat is present and within window (§5.2: REQUIRED)
     pop_iat = pop_claims.get("iat")
     if not isinstance(pop_iat, int):
         raise InvalidAttestationError(description="missing_attestation_pop_iat")
@@ -265,12 +260,12 @@ async def validate_client_attestation(
     if pop_iat < now - _JTI_WINDOW:
         raise InvalidAttestationError(description="attestation_pop_too_old")
 
-    # 15. Verify PoP nbf if present (RFC7519 via §5.2 rule 5)
+    # 14. Verify PoP nbf if present (RFC7519 via §5.2 rule 5)
     pop_nbf = pop_claims.get("nbf")
     if isinstance(pop_nbf, int) and pop_nbf > now + skew:
         raise InvalidAttestationError(description="attestation_pop_not_yet_valid")
 
-    # 16. Verify PoP exp if present (RFC7519 via §5.2 rule 5)
+    # 15. Verify PoP exp if present (RFC7519 via §5.2 rule 5)
     pop_exp = pop_claims.get("exp")
     if isinstance(pop_exp, int) and pop_exp <= now - skew:
         raise InvalidAttestationError(description="attestation_pop_expired")

@@ -9,38 +9,39 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="ADMIN_", extra="ignore")
 
+    # App metadata
     APP_ROOT_PATH: str = ""
     APP_TITLE: str = "OAuth 2.0 Authorization Server Admin API"
     APP_VERSION: str = "0.1.0"
     OPENAPI_URL: str = ""
 
-    OAUTH_ISSUER: str = ""
-    OAUTH_CLIENT_ID: str = ""
-    OAUTH_JWKS_URL: str = ""
+    # Bearer tokens
     MANAGE_AUTH_TOKEN: str = ""
+    INTERNAL_AUTH_TOKEN: str = ""
 
+    # Database
     DB_DRIVER_ASYNC: str = "postgresql+asyncpg"
     DB_DRIVER_SYNC: str = "postgresql+psycopg"
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
-
     DB_NAME: str = "auth_server_admin"
     DB_SCHEMA: str = "admin"
     DB_USER: str = "postgres"
     DB_PASSWORD: str = "postgres"
 
+    # Tenant database
     TENANT_DB_NAME: str = "auth_server_tenant"
     TENANT_DB_SCHEMA: str = "auth"
 
-    INTERNAL_AUTH_TOKEN: str = ""
-
+    # Client settings
     MIN_CLIENT_SECRET_LENGTH: int = 32
 
+    # Key encryption
     KEY_VERIFY_GRACE_TTL: int = 604800  # seconds, JWKS grace after retirement
     KEY_ENC_SECRETS: dict[str, str] = {}
     KEY_ENC_VERSION: int = 1
 
-    # CORS settings
+    # CORS
     CORS_ALLOW_ORIGINS: list[str] = []
     CORS_ALLOW_METHODS: list[str] = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
     CORS_ALLOW_HEADERS: list[str] = ["Authorization", "Content-Type"]
