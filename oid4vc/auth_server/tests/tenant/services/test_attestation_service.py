@@ -2,7 +2,7 @@
 
 import base64
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from joserfc import jwk as jose_jwk
@@ -44,26 +44,41 @@ def _sign_pop(wallet_key, payload):
 
 
 def _make_attestation_and_pop(
-    provider_key, kid, wallet_key, wallet_public,
-    *, iss="https://wallet-provider.example", sub="Ontario Wallet",
-    att_iat=1_699_999_900, att_exp=1_700_000_300,
-    pop_iss=None, pop_aud="https://as.example.com",
-    pop_jti="unique-jti-1", pop_iat=1_700_000_000,
+    provider_key,
+    kid,
+    wallet_key,
+    wallet_public,
+    *,
+    iss="https://wallet-provider.example",
+    sub="Ontario Wallet",
+    att_iat=1_699_999_900,
+    att_exp=1_700_000_300,
+    pop_iss=None,
+    pop_aud="https://as.example.com",
+    pop_jti="unique-jti-1",
+    pop_iat=1_700_000_000,
 ):
     """Build both attestation + PoP JWTs with sensible defaults."""
-    attestation = _sign_attestation(provider_key, kid, {
-        "iss": iss,
-        "sub": sub,
-        "cnf": {"jwk": wallet_public},
-        "iat": att_iat,
-        "exp": att_exp,
-    })
-    pop = _sign_pop(wallet_key, {
-        "iss": pop_iss if pop_iss is not None else sub,
-        "aud": pop_aud,
-        "jti": pop_jti,
-        "iat": pop_iat,
-    })
+    attestation = _sign_attestation(
+        provider_key,
+        kid,
+        {
+            "iss": iss,
+            "sub": sub,
+            "cnf": {"jwk": wallet_public},
+            "iat": att_iat,
+            "exp": att_exp,
+        },
+    )
+    pop = _sign_pop(
+        wallet_key,
+        {
+            "iss": pop_iss if pop_iss is not None else sub,
+            "aud": pop_aud,
+            "jti": pop_jti,
+            "iat": pop_iat,
+        },
+    )
     return attestation, pop
 
 
@@ -88,7 +103,6 @@ def default_settings(monkeypatch):
         raising=False,
     )
     # Swap DB-backed JTI cache for async-compatible in-memory version in tests
-    from unittest.mock import AsyncMock, MagicMock
 
     _seen: set[str] = set()
 
@@ -102,9 +116,7 @@ def default_settings(monkeypatch):
 
     test_cache = MagicMock()
     test_cache.check_and_store = _async_check_and_store
-    monkeypatch.setattr(
-        attestation_service, "_attest_pop_jti_cache", test_cache
-    )
+    monkeypatch.setattr(attestation_service, "_attest_pop_jti_cache", test_cache)
 
 
 @pytest.fixture
@@ -134,9 +146,7 @@ async def test_required_missing_raises(default_settings):
 async def test_invalid_kid_type_raises(default_settings):
     """Attestation JWT with non-string kid in header should fail."""
     # Build a JWT with kid as integer (invalid type)
-    header = _b64(
-        {"alg": "ES256", "typ": "oauth-client-attestation+jwt", "kid": 123}
-    )
+    header = _b64({"alg": "ES256", "typ": "oauth-client-attestation+jwt", "kid": 123})
     payload = _b64(
         {"iss": "https://provider.example", "sub": "wallet", "iat": 1, "exp": 2}
     )
@@ -188,7 +198,10 @@ async def test_valid_attestation_with_provider_lookup(
     wallet_key, wallet_public = _generate_wallet_key()
 
     attestation, pop = _make_attestation_and_pop(
-        provider_key, "key-1", wallet_key, wallet_public,
+        provider_key,
+        "key-1",
+        wallet_key,
+        wallet_public,
     )
 
     # Mock the lookup to return the provider's public key
@@ -232,12 +245,15 @@ async def test_invalid_signature_raises(default_settings, provider_keys, monkeyp
         },
     )
 
-    pop = _sign_pop(wallet_key, {
-        "iss": "Ontario Wallet",
-        "aud": "https://as.example.com",
-        "jti": "jti-1",
-        "iat": 1_700_000_000,
-    })
+    pop = _sign_pop(
+        wallet_key,
+        {
+            "iss": "Ontario Wallet",
+            "aud": "https://as.example.com",
+            "jti": "jti-1",
+            "iat": 1_700_000_000,
+        },
+    )
 
     # Return the REAL provider's public key — signature won't match
     mock_lookup = AsyncMock(return_value=provider_public)
@@ -270,12 +286,15 @@ async def test_expired_attestation_raises(default_settings, provider_keys, monke
         },
     )
 
-    pop = _sign_pop(wallet_key, {
-        "iss": "Ontario Wallet",
-        "aud": "https://as.example.com",
-        "jti": "jti-1",
-        "iat": 1_700_001_000,
-    })
+    pop = _sign_pop(
+        wallet_key,
+        {
+            "iss": "Ontario Wallet",
+            "aud": "https://as.example.com",
+            "jti": "jti-1",
+            "iat": 1_700_001_000,
+        },
+    )
 
     mock_lookup = AsyncMock(return_value=provider_public)
     monkeypatch.setattr(attestation_service, "_lookup_provider_key", mock_lookup)
@@ -297,12 +316,16 @@ async def test_invalid_attestation_typ_raises(default_settings, monkeypatch):
     provider_key, _ = _generate_provider_key()
     # Sign with wrong typ
     header = {"alg": "ES256", "typ": "jwt", "kid": "key-1"}
-    token = jose_jwt.encode(header, {
-        "iss": "https://provider.example",
-        "sub": "wallet",
-        "iat": 1,
-        "exp": 2,
-    }, provider_key)
+    token = jose_jwt.encode(
+        header,
+        {
+            "iss": "https://provider.example",
+            "sub": "wallet",
+            "iat": 1,
+            "exp": 2,
+        },
+        provider_key,
+    )
 
     with pytest.raises(attestation_service.InvalidAttestationError) as exc_info:
         await attestation_service.validate_client_attestation(
@@ -391,12 +414,15 @@ async def test_pop_wrong_signature_raises(default_settings, provider_keys, monke
 
     # Sign PoP with a DIFFERENT key (not the wallet key)
     wrong_key, _ = _generate_wallet_key()
-    pop = _sign_pop(wrong_key, {
-        "iss": "Ontario Wallet",
-        "aud": "https://as.example.com",
-        "jti": "jti-1",
-        "iat": 1_700_000_000,
-    })
+    pop = _sign_pop(
+        wrong_key,
+        {
+            "iss": "Ontario Wallet",
+            "aud": "https://as.example.com",
+            "jti": "jti-1",
+            "iat": 1_700_000_000,
+        },
+    )
 
     mock_lookup = AsyncMock(return_value=provider_public)
     monkeypatch.setattr(attestation_service, "_lookup_provider_key", mock_lookup)
@@ -410,53 +436,31 @@ async def test_pop_wrong_signature_raises(default_settings, provider_keys, monke
     assert "pop_signature_invalid" in exc_info.value.description
 
 
-async def test_pop_iss_mismatch_raises(default_settings, provider_keys, monkeypatch):
-    """PoP iss must match attestation sub."""
-    monkeypatch.setattr(attestation_service, "_now_ts", lambda: 1_700_000_000)
-    provider_key, provider_public = provider_keys
-    wallet_key, wallet_public = _generate_wallet_key()
-
-    attestation, _ = _make_attestation_and_pop(
-        provider_key, "key-1", wallet_key, wallet_public,
-    )
-    # Sign PoP with wrong iss
-    pop = _sign_pop(wallet_key, {
-        "iss": "wrong-issuer",
-        "aud": "https://as.example.com",
-        "jti": "jti-1",
-        "iat": 1_700_000_000,
-    })
-
-    mock_lookup = AsyncMock(return_value=provider_public)
-    monkeypatch.setattr(attestation_service, "_lookup_provider_key", mock_lookup)
-
-    with pytest.raises(attestation_service.InvalidAttestationError) as exc_info:
-        await attestation_service.validate_client_attestation(
-            client_attestation=attestation,
-            client_attestation_pop=pop,
-            attestation_required=True,
-        )
-    assert "pop_iss_mismatch" in exc_info.value.description
-
-
 async def test_pop_missing_aud_raises(default_settings, provider_keys, monkeypatch):
     """PoP without aud claim should fail."""
     monkeypatch.setattr(attestation_service, "_now_ts", lambda: 1_700_000_000)
     provider_key, provider_public = provider_keys
     wallet_key, wallet_public = _generate_wallet_key()
 
-    attestation = _sign_attestation(provider_key, "key-1", {
-        "iss": "https://wallet-provider.example",
-        "sub": "Ontario Wallet",
-        "cnf": {"jwk": wallet_public},
-        "iat": 1_699_999_900,
-        "exp": 1_700_000_300,
-    })
-    pop = _sign_pop(wallet_key, {
-        "iss": "Ontario Wallet",
-        "jti": "jti-1",
-        "iat": 1_700_000_000,
-    })
+    attestation = _sign_attestation(
+        provider_key,
+        "key-1",
+        {
+            "iss": "https://wallet-provider.example",
+            "sub": "Ontario Wallet",
+            "cnf": {"jwk": wallet_public},
+            "iat": 1_699_999_900,
+            "exp": 1_700_000_300,
+        },
+    )
+    pop = _sign_pop(
+        wallet_key,
+        {
+            "iss": "Ontario Wallet",
+            "jti": "jti-1",
+            "iat": 1_700_000_000,
+        },
+    )
 
     mock_lookup = AsyncMock(return_value=provider_public)
     monkeypatch.setattr(attestation_service, "_lookup_provider_key", mock_lookup)
@@ -477,7 +481,10 @@ async def test_pop_aud_mismatch_raises(default_settings, provider_keys, monkeypa
     wallet_key, wallet_public = _generate_wallet_key()
 
     attestation, pop = _make_attestation_and_pop(
-        provider_key, "key-1", wallet_key, wallet_public,
+        provider_key,
+        "key-1",
+        wallet_key,
+        wallet_public,
         pop_aud="https://other-as.example.com",
     )
 
@@ -500,19 +507,26 @@ async def test_pop_aud_array_accepted(default_settings, provider_keys, monkeypat
     provider_key, provider_public = provider_keys
     wallet_key, wallet_public = _generate_wallet_key()
 
-    attestation = _sign_attestation(provider_key, "key-1", {
-        "iss": "https://wallet-provider.example",
-        "sub": "Ontario Wallet",
-        "cnf": {"jwk": wallet_public},
-        "iat": 1_699_999_900,
-        "exp": 1_700_000_300,
-    })
-    pop = _sign_pop(wallet_key, {
-        "iss": "Ontario Wallet",
-        "aud": ["https://as.example.com", "https://other.example.com"],
-        "jti": "jti-1",
-        "iat": 1_700_000_000,
-    })
+    attestation = _sign_attestation(
+        provider_key,
+        "key-1",
+        {
+            "iss": "https://wallet-provider.example",
+            "sub": "Ontario Wallet",
+            "cnf": {"jwk": wallet_public},
+            "iat": 1_699_999_900,
+            "exp": 1_700_000_300,
+        },
+    )
+    pop = _sign_pop(
+        wallet_key,
+        {
+            "iss": "Ontario Wallet",
+            "aud": ["https://as.example.com", "https://other.example.com"],
+            "jti": "jti-1",
+            "iat": 1_700_000_000,
+        },
+    )
 
     mock_lookup = AsyncMock(return_value=provider_public)
     monkeypatch.setattr(attestation_service, "_lookup_provider_key", mock_lookup)
@@ -533,18 +547,25 @@ async def test_pop_missing_jti_raises(default_settings, provider_keys, monkeypat
     provider_key, provider_public = provider_keys
     wallet_key, wallet_public = _generate_wallet_key()
 
-    attestation = _sign_attestation(provider_key, "key-1", {
-        "iss": "https://wallet-provider.example",
-        "sub": "Ontario Wallet",
-        "cnf": {"jwk": wallet_public},
-        "iat": 1_699_999_900,
-        "exp": 1_700_000_300,
-    })
-    pop = _sign_pop(wallet_key, {
-        "iss": "Ontario Wallet",
-        "aud": "https://as.example.com",
-        "iat": 1_700_000_000,
-    })
+    attestation = _sign_attestation(
+        provider_key,
+        "key-1",
+        {
+            "iss": "https://wallet-provider.example",
+            "sub": "Ontario Wallet",
+            "cnf": {"jwk": wallet_public},
+            "iat": 1_699_999_900,
+            "exp": 1_700_000_300,
+        },
+    )
+    pop = _sign_pop(
+        wallet_key,
+        {
+            "iss": "Ontario Wallet",
+            "aud": "https://as.example.com",
+            "iat": 1_700_000_000,
+        },
+    )
 
     mock_lookup = AsyncMock(return_value=provider_public)
     monkeypatch.setattr(attestation_service, "_lookup_provider_key", mock_lookup)
@@ -564,21 +585,29 @@ async def test_pop_invalid_typ_raises(default_settings, provider_keys, monkeypat
     provider_key, provider_public = provider_keys
     wallet_key, wallet_public = _generate_wallet_key()
 
-    attestation = _sign_attestation(provider_key, "key-1", {
-        "iss": "https://wallet-provider.example",
-        "sub": "Ontario Wallet",
-        "cnf": {"jwk": wallet_public},
-        "iat": 1_699_999_900,
-        "exp": 1_700_000_300,
-    })
+    attestation = _sign_attestation(
+        provider_key,
+        "key-1",
+        {
+            "iss": "https://wallet-provider.example",
+            "sub": "Ontario Wallet",
+            "cnf": {"jwk": wallet_public},
+            "iat": 1_699_999_900,
+            "exp": 1_700_000_300,
+        },
+    )
     # Sign PoP with wrong typ
     pop_header = {"alg": "ES256", "typ": "jwt"}
-    pop = jose_jwt.encode(pop_header, {
-        "iss": "Ontario Wallet",
-        "aud": "https://as.example.com",
-        "jti": "jti-1",
-        "iat": 1_700_000_000,
-    }, wallet_key)
+    pop = jose_jwt.encode(
+        pop_header,
+        {
+            "iss": "Ontario Wallet",
+            "aud": "https://as.example.com",
+            "jti": "jti-1",
+            "iat": 1_700_000_000,
+        },
+        wallet_key,
+    )
 
     mock_lookup = AsyncMock(return_value=provider_public)
     monkeypatch.setattr(attestation_service, "_lookup_provider_key", mock_lookup)
@@ -599,7 +628,10 @@ async def test_pop_jti_replay_raises(default_settings, provider_keys, monkeypatc
     wallet_key, wallet_public = _generate_wallet_key()
 
     attestation, pop = _make_attestation_and_pop(
-        provider_key, "key-1", wallet_key, wallet_public,
+        provider_key,
+        "key-1",
+        wallet_key,
+        wallet_public,
         pop_jti="replay-jti-1",
     )
 

@@ -128,9 +128,7 @@ async def _lookup_provider_key(
         params["kid"] = kid
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                url, params=params, headers=headers
-            )
+            resp = await client.get(url, params=params, headers=headers)
             if resp.status_code != 200:
                 logger.debug(
                     "Provider lookup non-200 iss=%s kid=%s status=%d",

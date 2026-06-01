@@ -205,6 +205,8 @@ cython_debug/
 
 # Local demo/dev key material
 resources/.demo_keys.json
+# Demo notebook key store
+.demo_keys.json
 # Local test/analysis artifacts
 .test-reports/
 .VSCodeCounter/

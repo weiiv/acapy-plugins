@@ -51,7 +51,8 @@ class TestJWKSCacheGetJwks:
         with patch.object(cache, "_fetch", new=fetch):
             await cache.get_jwks("https://example.com/jwks")
             result = await cache.get_jwks(
-                "https://example.com/jwks", kid="k2",
+                "https://example.com/jwks",
+                kid="k2",
             )
         assert len(result.keys) == 2
         assert fetch.call_count == 2
@@ -62,7 +63,8 @@ class TestJWKSCacheGetJwks:
         with patch.object(cache, "_fetch", new=fetch):
             await cache.get_jwks("https://example.com/jwks")
             result = await cache.get_jwks(
-                "https://example.com/jwks", kid="k1",
+                "https://example.com/jwks",
+                kid="k1",
             )
         assert len(result.keys) == 1
         assert fetch.call_count == 1
@@ -74,7 +76,8 @@ class TestJWKSCacheGetJwks:
         ts, ks, uri = cache._cache["https://example.com/jwks"]
         cache._cache["https://example.com/jwks"] = (ts - 20, ks, uri)
         with patch.object(
-            cache, "_fetch",
+            cache,
+            "_fetch",
             new=AsyncMock(side_effect=httpx.HTTPError("timeout")),
         ):
             result = await cache.get_jwks("https://example.com/jwks")
@@ -83,7 +86,8 @@ class TestJWKSCacheGetJwks:
     async def test_returns_none_on_fetch_failure_no_stale(self):
         cache = JWKSCache(ttl=300)
         with patch.object(
-            cache, "_fetch",
+            cache,
+            "_fetch",
             new=AsyncMock(side_effect=httpx.HTTPError("fail")),
         ):
             assert await cache.get_jwks("https://example.com/jwks") is None
@@ -173,7 +177,8 @@ class TestJWKSCacheGetKey:
         cache = JWKSCache(ttl=300)
         cache.put("iss1", JWKS_A, jwks_uri="https://p.example/jwks")
         with patch.object(
-            cache, "_fetch",
+            cache,
+            "_fetch",
             new=AsyncMock(side_effect=httpx.HTTPError("fail")),
         ):
             assert await cache.get_key("iss1", "k999") is None

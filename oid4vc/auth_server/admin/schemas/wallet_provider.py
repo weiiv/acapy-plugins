@@ -31,18 +31,12 @@ class WalletProviderIn(BaseModel):
     )
 
     iss: str = Field(description="Wallet provider issuer identifier (URL)")
-    jwks: dict[str, Any] | None = Field(
-        default=None, description="Inline JWKS document"
-    )
+    jwks: dict[str, Any] | None = Field(default=None, description="Inline JWKS document")
     jwks_uri: str | None = Field(
         default=None, description="URL to fetch the provider's JWKS"
     )
-    name: str | None = Field(
-        default=None, description="Display name for the provider"
-    )
-    active: bool = Field(
-        default=True, description="Whether this provider is active"
-    )
+    name: str | None = Field(default=None, description="Display name for the provider")
+    active: bool = Field(default=True, description="Whether this provider is active")
 
     @model_validator(mode="after")
     def _require_jwks_or_uri(self):
@@ -63,15 +57,11 @@ class WalletProviderUpdate(BaseModel):
         }
     )
 
-    iss: str | None = Field(
-        default=None, description="Updated issuer identifier"
-    )
+    iss: str | None = Field(default=None, description="Updated issuer identifier")
     jwks: dict[str, Any] | None = Field(
         default=None, description="Updated inline JWKS document"
     )
-    jwks_uri: str | None = Field(
-        default=None, description="Updated JWKS URI"
-    )
+    jwks_uri: str | None = Field(default=None, description="Updated JWKS URI")
     name: str | None = Field(default=None, description="Updated display name")
     active: bool | None = Field(default=None, description="Updated active status")
 
