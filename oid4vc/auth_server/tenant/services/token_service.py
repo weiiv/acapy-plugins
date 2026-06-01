@@ -66,6 +66,7 @@ class TokenService:
         realm: str,
         tx_code: str | None = None,
         attestation: dict[str, Any] | None = None,
+        dpop_jkt: str | None = None,
     ):
         """Issue access+refresh from a pre-auth code."""
         grant_repo = GrantRepository(db)
@@ -129,7 +130,9 @@ class TokenService:
 
         token_meta: dict[str, Any] = {"iss": issuer, "realm": realm}
         token_meta.update(response_meta)
-        cnf_jkt = attestation.get("cnf_jkt") if isinstance(attestation, dict) else None
+        cnf_jkt = dpop_jkt or (
+            attestation.get("cnf_jkt") if isinstance(attestation, dict) else None
+        )
         access_token = await access_repo.create(
             subject_id=pac.subject_id,
             token=sign_res["jwt"],
@@ -158,6 +161,7 @@ class TokenService:
         refresh_token_value: str,
         realm: str,
         attestation: dict[str, Any] | None = None,
+        dpop_jkt: str | None = None,
     ):
         """Rotate tokens using a refresh token."""
         access_repo = AccessTokenRepository(db)
@@ -246,7 +250,7 @@ class TokenService:
 
         token_meta: dict[str, Any] = {"iss": issuer, "realm": realm}
         token_meta.update(response_meta)
-        cnf_jkt = (
+        cnf_jkt = dpop_jkt or (
             effective_attestation.get("cnf_jkt")
             if isinstance(effective_attestation, dict)
             else None

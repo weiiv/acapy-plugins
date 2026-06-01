@@ -87,7 +87,8 @@ async def test_load_jwks_invalid_string_returns_none():
 async def test_load_jwks_from_uri(monkeypatch):
     fake_keyset = KeySet.import_key_set(_test_jwks)
     monkeypatch.setattr(
-        client_auth, "_jwks_uri_cache",
+        client_auth,
+        "_jwks_uri_cache",
         MagicMock(get_jwks=AsyncMock(return_value=fake_keyset)),
     )
 
@@ -102,7 +103,8 @@ async def test_load_jwks_from_uri(monkeypatch):
 @pytest.mark.asyncio
 async def test_load_jwks_uri_failure_returns_none(monkeypatch):
     monkeypatch.setattr(
-        client_auth, "_jwks_uri_cache",
+        client_auth,
+        "_jwks_uri_cache",
         MagicMock(get_jwks=AsyncMock(return_value=None)),
     )
     client = fake_client(jwks=None, jwks_uri="https://bad.example.org")
@@ -197,7 +199,8 @@ async def test_decode_and_validate_jwt_success(monkeypatch):
         client_auth.jwt, "JWTClaimsRegistry", MagicMock(return_value=fake_registry)
     )
     monkeypatch.setattr(
-        client_auth, "_pkjwt_jti_cache",
+        client_auth,
+        "_pkjwt_jti_cache",
         MagicMock(check_and_store=AsyncMock(return_value=True)),
     )
 
@@ -210,9 +213,7 @@ async def test_decode_and_validate_jwt_success(monkeypatch):
     )
 
     assert claims == payload
-    jwt_decode_mock.assert_called_once_with(
-        "token", "secret", algorithms=["RS256"]
-    )
+    jwt_decode_mock.assert_called_once_with("token", "secret", algorithms=["RS256"])
 
 
 @pytest.mark.asyncio
@@ -223,9 +224,7 @@ async def test_decode_and_validate_jwt_decode_failure(monkeypatch):
         raise ValueError("bad token")
 
     monkeypatch.setattr(client_auth.jwt, "decode", raise_error)
-    monkeypatch.setattr(
-        client_auth, "jwt_header_unverified", lambda _: {"alg": "ES256"}
-    )
+    monkeypatch.setattr(client_auth, "jwt_header_unverified", lambda _: {"alg": "ES256"})
 
     with pytest.raises(HTTPException) as exc_info:
         await client_auth._decode_and_validate_jwt(
@@ -250,9 +249,7 @@ async def test_decode_and_validate_jwt_non_mapping(monkeypatch):
     )
     monkeypatch.setattr(client_auth.jwt, "decode", lambda *_args, **_kwargs: Dummy())
     monkeypatch.setattr(client_auth, "_validate_jwt_claims", lambda *_: None)
-    monkeypatch.setattr(
-        client_auth, "jwt_header_unverified", lambda _: {"alg": "ES256"}
-    )
+    monkeypatch.setattr(client_auth, "jwt_header_unverified", lambda _: {"alg": "ES256"})
 
     with pytest.raises(HTTPException) as exc_info:
         await client_auth._decode_and_validate_jwt(
@@ -273,9 +270,7 @@ async def test_authenticate_private_key_jwt_success(monkeypatch):
         client_secret=None,
     )
 
-    monkeypatch.setattr(
-        client_auth, "_load_jwks", AsyncMock(return_value=fake_keyset)
-    )
+    monkeypatch.setattr(client_auth, "_load_jwks", AsyncMock(return_value=fake_keyset))
     decode_mock = AsyncMock(return_value={"sub": "client-1", "iss": "client-1"})
     monkeypatch.setattr(client_auth, "_decode_and_validate_jwt", decode_mock)
 
@@ -289,9 +284,7 @@ async def test_authenticate_private_key_jwt_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_authenticate_private_key_jwt_missing_keys(monkeypatch):
-    client = fake_client(
-        jwks=None, jwks_uri=None, client_secret=None, client_id="c1"
-    )
+    client = fake_client(jwks=None, jwks_uri=None, client_secret=None, client_id="c1")
     monkeypatch.setattr(client_auth, "_load_jwks", AsyncMock(return_value=None))
 
     with pytest.raises(HTTPException) as exc_info:

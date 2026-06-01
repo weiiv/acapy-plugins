@@ -99,9 +99,7 @@ async def _lookup_provider_key(
         params["kid"] = kid
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                url, params=params, headers=headers
-            )
+            resp = await client.get(url, params=params, headers=headers)
             if resp.status_code != 200:
                 return None
             data = resp.json()
@@ -238,9 +236,7 @@ async def validate_client_attestation(
     if expected_audience:
         aud_values = pop_aud if isinstance(pop_aud, list) else [pop_aud]
         if expected_audience not in aud_values:
-            raise InvalidAttestationError(
-                description="attestation_pop_aud_mismatch"
-            )
+            raise InvalidAttestationError(description="attestation_pop_aud_mismatch")
 
     # 12. Verify PoP jti is present (§5.2: REQUIRED)
     pop_jti = pop_claims.get("jti")

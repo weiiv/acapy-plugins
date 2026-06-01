@@ -46,7 +46,10 @@ class ClientService:
             if len(data.client_secret) < settings.MIN_CLIENT_SECRET_LENGTH:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"client_secret_too_short (min {settings.MIN_CLIENT_SECRET_LENGTH} chars)",
+                    detail=(
+                        "client_secret_too_short "
+                        f"(min {settings.MIN_CLIENT_SECRET_LENGTH} chars)"
+                    ),
                 )
             secret_hash = hash_secret_pbkdf2(data.client_secret)
 
@@ -90,7 +93,10 @@ class ClientService:
             if len(values["client_secret"]) < settings.MIN_CLIENT_SECRET_LENGTH:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"client_secret_too_short (min {settings.MIN_CLIENT_SECRET_LENGTH} chars)",
+                    detail=(
+                        "client_secret_too_short "
+                        f"(min {settings.MIN_CLIENT_SECRET_LENGTH} chars)",
+                    ),
                 )
             values["client_secret"] = hash_secret_pbkdf2(values["client_secret"])
         changed = await self.repo.update_values(row.id, values)

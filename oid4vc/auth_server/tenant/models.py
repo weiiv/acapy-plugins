@@ -125,7 +125,5 @@ class JtiSeen(Base):
     __tablename__ = "jti_seen"
 
     jti: Mapped[str] = mapped_column(Text, primary_key=True)
-    expires_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False
-    )
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     jti_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)

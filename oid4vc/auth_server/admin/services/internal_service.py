@@ -26,12 +26,14 @@ _provider_jwks_cache = JWKSCache(ttl=300)
 async def load_wallet_providers(session: AsyncSession) -> None:
     """Load all active wallet providers into the JWKS cache (startup)."""
     rows = (
-        await session.execute(
-            select(WalletProvider).where(
-                WalletProvider.active.is_(True)
+        (
+            await session.execute(
+                select(WalletProvider).where(WalletProvider.active.is_(True))
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for row in rows:
         _provider_jwks_cache.put(
             row.iss,
@@ -41,13 +43,9 @@ async def load_wallet_providers(session: AsyncSession) -> None:
     logger.info("Loaded %d wallet providers into cache", len(rows))
 
 
-def refresh_provider_cache(
-    iss: str, jwks: dict | None, jwks_uri: str | None
-) -> None:
+def refresh_provider_cache(iss: str, jwks: dict | None, jwks_uri: str | None) -> None:
     """Refresh a single provider's cache entry (called after create/update)."""
-    _provider_jwks_cache.put(
-        iss, jwks, jwks_uri=jwks_uri
-    )
+    _provider_jwks_cache.put(iss, jwks, jwks_uri=jwks_uri)
 
 
 def invalidate_provider_cache(iss: str) -> None:
@@ -106,9 +104,7 @@ async def get_tenant_jwks(session: AsyncSession, uid: str) -> Dict[str, List[dic
     return {"keys": keys}
 
 
-async def lookup_wallet_provider(
-    iss: str, kid: str | None = None
-) -> dict | None:
+async def lookup_wallet_provider(iss: str, kid: str | None = None) -> dict | None:
     """Look up wallet provider key(s) by iss (+ optional kid).
 
     When *kid* is provided, returns a single key dict under ``public_key``.

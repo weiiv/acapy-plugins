@@ -68,9 +68,7 @@ def _validate_jwt_claims(decoded: dict[str, Any], request: Request):
     """Validate standard JWT claims."""
     for claim in ("iss", "sub", "aud", "exp", "iat", "jti"):
         if claim not in decoded:
-            raise HTTPException(
-                status_code=401, detail=f"missing_{claim}"
-            )
+            raise HTTPException(status_code=401, detail=f"missing_{claim}")
     aud = decoded.get("aud")
     expected_aud = _audiences_for(request)
     if isinstance(aud, str):
@@ -96,9 +94,7 @@ async def _decode_and_validate_jwt(
         header = jwt_header_unverified(token)
         alg = header.get("alg")
         if alg not in SUPPORTED_SIGNING_ALGS:
-            raise HTTPException(
-                status_code=401, detail="unsupported_alg"
-            )
+            raise HTTPException(status_code=401, detail="unsupported_alg")
         algorithms = [alg]
 
     try:
@@ -111,24 +107,18 @@ async def _decode_and_validate_jwt(
         raise
     except Exception as exc:
         logger.warning("client_assertion decode/validate failed: %s", exc)
-        raise HTTPException(
-            status_code=401, detail="invalid_client"
-        ) from exc
+        raise HTTPException(status_code=401, detail="invalid_client") from exc
 
     if not isinstance(claims, Mapping):
         logger.warning("JWT claims is not a mapping")
-        raise HTTPException(
-            status_code=401, detail="invalid_client"
-        )
+        raise HTTPException(status_code=401, detail="invalid_client")
 
     # Replay check (RFC 7523 §3) — store until JWT expires
     jti = claims.get("jti")
     exp = claims.get("exp")
     if not await _pkjwt_jti_cache.check_and_store(jti, db, expires_at=exp):
         logger.warning("replayed jti=%s for sub=%s", jti, claims.get("sub"))
-        raise HTTPException(
-            status_code=401, detail="invalid_client"
-        )
+        raise HTTPException(status_code=401, detail="invalid_client")
 
     return claims
 
@@ -145,12 +135,8 @@ async def _authenticate_private_key_jwt(
     kid = header.get("kid")
     keys = await _load_jwks(client, kid=kid)
     if not keys or not keys.keys:
-        logger.warning(
-            "no keys found for client=%s kid=%s", client.client_id, kid
-        )
-        raise HTTPException(
-            status_code=401, detail="invalid_client"
-        )
+        logger.warning("no keys found for client=%s kid=%s", client.client_id, kid)
+        raise HTTPException(status_code=401, detail="invalid_client")
 
     claims = await _decode_and_validate_jwt(
         token,
@@ -164,22 +150,22 @@ async def _authenticate_private_key_jwt(
     if str(claims.get("iss")) != str(client.client_id):
         logger.warning(
             "iss mismatch: got %s, expected %s",
-            claims.get("iss"), client.client_id,
+            claims.get("iss"),
+            client.client_id,
         )
         raise HTTPException(status_code=401, detail="invalid_client")
     if str(claims.get("sub")) != str(client.client_id):
         logger.warning(
             "sub mismatch: got %s, expected %s",
-            claims.get("sub"), client.client_id,
+            claims.get("sub"),
+            client.client_id,
         )
         raise HTTPException(status_code=401, detail="invalid_client")
 
     return claims
 
 
-def _authenticate_client_secret_basic(
-    client: AuthClient, token: str
-) -> None:
+def _authenticate_client_secret_basic(client: AuthClient, token: str) -> None:
     """Validate client_secret_basic credentials."""
 
     secret_hash = client.client_secret
@@ -202,11 +188,7 @@ async def _base_client_auth(
     client_id: str | None = None
     token: str | None = None
 
-    scheme = (
-        credentials.scheme.lower()
-        if credentials and credentials.scheme
-        else ""
-    )
+    scheme = credentials.scheme.lower() if credentials and credentials.scheme else ""
     cred = credentials.credentials if credentials else ""
 
     if scheme == "bearer" and cred:
@@ -216,9 +198,7 @@ async def _base_client_auth(
             client_id = claims.get("sub")
         except Exception as ex:
             logger.exception("Failed to decode bearer token: %s", ex)
-            raise HTTPException(
-                status_code=401, detail="invalid_client_assertion"
-            )
+            raise HTTPException(status_code=401, detail="invalid_client_assertion")
     elif basic_creds and basic_creds.username is not None:
         client_id = basic_creds.username
         token = basic_creds.password or ""
@@ -247,34 +227,25 @@ async def _base_client_auth(
     if allowed not in set(CLIENT_AUTH_METHODS):
         logger.warning(
             "unsupported auth method=%s for client=%s",
-            allowed, client.client_id,
+            allowed,
+            client.client_id,
         )
-        raise HTTPException(
-            status_code=401, detail="invalid_client"
-        )
+        raise HTTPException(status_code=401, detail="invalid_client")
 
-    if (
-        allowed == CLIENT_AUTH_METHOD.CLIENT_SECRET_BASIC
-        and scheme != "basic"
-    ):
+    if allowed == CLIENT_AUTH_METHOD.CLIENT_SECRET_BASIC and scheme != "basic":
         logger.warning(
             "client=%s requires basic auth, got scheme=%s",
-            client.client_id, scheme,
+            client.client_id,
+            scheme,
         )
-        raise HTTPException(
-            status_code=401, detail="invalid_client"
-        )
-    if (
-        allowed == CLIENT_AUTH_METHOD.PRIVATE_KEY_JWT
-        and scheme != "bearer"
-    ):
+        raise HTTPException(status_code=401, detail="invalid_client")
+    if allowed == CLIENT_AUTH_METHOD.PRIVATE_KEY_JWT and scheme != "bearer":
         logger.warning(
             "client=%s requires private_key_jwt, got scheme=%s",
-            client.client_id, scheme,
+            client.client_id,
+            scheme,
         )
-        raise HTTPException(
-            status_code=401, detail="invalid_client"
-        )
+        raise HTTPException(status_code=401, detail="invalid_client")
 
     if allowed == CLIENT_AUTH_METHOD.PRIVATE_KEY_JWT:
         await _authenticate_private_key_jwt(client, token, request, db)
@@ -291,12 +262,8 @@ async def _base_client_auth(
 
 async def client_auth(
     request: Request,
-    basic_creds: HTTPBasicCredentials | None = Security(
-        basic_security
-    ),
-    credentials: HTTPAuthorizationCredentials | None = Security(
-        bearer_security
-    ),
+    basic_creds: HTTPBasicCredentials | None = Security(basic_security),
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_security),
     db: AsyncSession = Depends(get_db_session),
 ) -> AuthClient:
     """FastAPI dependency: authenticate client for tenant endpoints."""

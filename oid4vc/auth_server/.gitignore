@@ -203,6 +203,9 @@ cython_debug/
 .env.*
 !.env.*.example
 
+# Demo notebook key store
+.demo_keys.json
+
 # Local test/analysis artifacts
 .test-reports/
 .VSCodeCounter/

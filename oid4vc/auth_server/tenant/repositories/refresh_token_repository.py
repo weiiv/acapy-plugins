@@ -4,7 +4,6 @@ from typing import Union
 from datetime import datetime
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from tenant.models import RefreshToken
 from tenant.repositories.base import BaseTokenRepository

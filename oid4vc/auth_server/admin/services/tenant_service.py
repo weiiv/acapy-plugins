@@ -282,15 +282,11 @@ class TenantService:
 
     async def list_clients(self, uid: str) -> list[Client]:
         """List all clients."""
-        return await self._with_client_service(
-            uid, "list", lambda svc: svc.list()
-        )
+        return await self._with_client_service(uid, "list", lambda svc: svc.list())
 
     async def get_client(self, uid: str, client_id: str) -> Client | None:
         """Get a specific client."""
-        return await self._with_client_service(
-            uid, "get", lambda svc: svc.get(client_id)
-        )
+        return await self._with_client_service(uid, "get", lambda svc: svc.get(client_id))
 
     async def update_client(self, uid: str, client_id: str, data: ClientIn) -> int:
         """Update a client."""

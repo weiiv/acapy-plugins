@@ -43,7 +43,8 @@ async def test_remote_sign_jwt_success(monkeypatch):
     monkeypatch.setattr(signing_service.settings, "INTERNAL_BASE_URL", "https://admin")
     monkeypatch.setattr(signing_service.settings, "INTERNAL_AUTH_TOKEN", "token")
     monkeypatch.setattr(
-        signing_service, "internal_api_headers",
+        signing_service,
+        "internal_api_headers",
         lambda token: {"Authorization": f"Bearer {token}", "X-Request-ID": "req-123"},
     )
 
@@ -85,7 +86,8 @@ async def test_remote_sign_jwt_without_kid(monkeypatch):
     monkeypatch.setattr(signing_service.settings, "INTERNAL_BASE_URL", "https://admin")
     monkeypatch.setattr(signing_service.settings, "INTERNAL_AUTH_TOKEN", "token")
     monkeypatch.setattr(
-        signing_service, "internal_api_headers",
+        signing_service,
+        "internal_api_headers",
         lambda token: {"Authorization": f"Bearer {token}"},
     )
 
@@ -116,7 +118,8 @@ async def test_remote_sign_jwt_raises_on_http_error(monkeypatch):
     monkeypatch.setattr(signing_service.settings, "INTERNAL_BASE_URL", "https://admin")
     monkeypatch.setattr(signing_service.settings, "INTERNAL_AUTH_TOKEN", "token")
     monkeypatch.setattr(
-        signing_service, "internal_api_headers",
+        signing_service,
+        "internal_api_headers",
         lambda token: {"Authorization": f"Bearer {token}"},
     )
 
