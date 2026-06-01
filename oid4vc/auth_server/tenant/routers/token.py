@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tenant.deps import get_db_session
 from tenant.oauth.server import get_authorization_server
 from tenant.oauth.integration.request import to_oauth2_request
+from tenant.services.dpop_service import get_dpop_nonce
 
 router = APIRouter(prefix="/tenants/{uid}")
 
@@ -48,4 +49,8 @@ async def token_endpoint(
     resp_headers = dict(headers)
     resp_headers["Cache-Control"] = "no-store"
     resp_headers["Pragma"] = "no-cache"
+    # Always include a fresh DPoP-Nonce when nonce is configured (RFC 9449 §8.2)
+    dpop_nonce = get_dpop_nonce()
+    if dpop_nonce:
+        resp_headers["DPoP-Nonce"] = dpop_nonce
     return ORJSONResponse(body, status_code=status_code, headers=resp_headers)

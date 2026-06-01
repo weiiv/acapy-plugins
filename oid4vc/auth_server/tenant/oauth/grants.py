@@ -5,12 +5,14 @@ from urllib.parse import urlparse
 
 from authlib.oauth2.rfc6749 import grants
 from authlib.oauth2.rfc6749.errors import InvalidRequestError
+from authlib.oauth2.rfc9449.errors import InvalidDPopProofError
 from starlette.requests import Request
 
 from core.consts import OAuth2Flow, OAuth2GrantType
 from tenant.config import settings
 from tenant.oauth.integration.context import get_context, update_context
 from tenant.services.attestation_service import validate_client_attestation
+from tenant.services.dpop_service import validate_dpop_proof
 
 
 class _BaseTenantGrant(grants.BaseGrant):
@@ -62,6 +64,20 @@ class _BaseTenantGrant(grants.BaseGrant):
             db=getattr(extra, "db", None),
         )
 
+    def _validate_dpop(self) -> str | None:
+        """Validate DPoP proof if present or required.
+
+        Returns the JWK thumbprint (jkt) on success, None if DPoP not used.
+        Raises UseDPoPNonceError or InvalidDPopProofError on failure.
+        """
+        headers = getattr(self.request, "headers", {}) or {}
+        has_dpop = "dpop" in headers or "DPoP" in headers
+        if not has_dpop and not settings.DPOP_REQUIRED:
+            return None
+        if not has_dpop and settings.DPOP_REQUIRED:
+            raise InvalidDPopProofError("DPoP proof required", algs=["ES256", "ES384"])
+        return validate_dpop_proof(self.request)
+
 
 class PreAuthorizedCodeGrant(_BaseTenantGrant):
     """OID4VCI pre-authorized_code grant."""
@@ -69,6 +85,7 @@ class PreAuthorizedCodeGrant(_BaseTenantGrant):
     _code: str | None = None
     _tx_code: str | None = None
     _attestation_meta: dict[str, Any] | None = None
+    _dpop_jkt: str | None = None
 
     async def validate_token_request(self):
         """Validate pre-authorized_code request."""
@@ -82,6 +99,7 @@ class PreAuthorizedCodeGrant(_BaseTenantGrant):
         self._attestation_meta = await self._validate_attestation(
             required=settings.ATTESTATION_REQUIRED
         )
+        self._dpop_jkt = self._validate_dpop()
 
     async def create_token_response(self):
         """Create token response for pre-authorized_code."""
@@ -95,11 +113,14 @@ class PreAuthorizedCodeGrant(_BaseTenantGrant):
                 "code": self._code or "",
                 "tx_code": self._tx_code,
                 "attestation": self._attestation_meta,
+                "dpop_jkt": self._dpop_jkt,
                 "realm": uid,
             },
         )
         token_data: dict[str, Any] = {}
         await self.server.save_token(token_data, self.request)
+        if self._dpop_jkt:
+            token_data["token_type"] = "DPoP"
         # Core server appends no-store headers; avoid duplication here
         return 200, token_data, []
 
@@ -119,6 +140,7 @@ class RotatingRefreshTokenGrant(_BaseTenantGrant):
 
     _refresh_token: str | None = None
     _attestation_meta: dict[str, Any] | None = None
+    _dpop_jkt: str | None = None
 
     async def validate_token_request(self):
         """Validate refresh_token request."""
@@ -131,6 +153,7 @@ class RotatingRefreshTokenGrant(_BaseTenantGrant):
         self._attestation_meta = await self._validate_attestation(
             required=settings.ATTESTATION_REQUIRED
         )
+        self._dpop_jkt = self._validate_dpop()
 
     async def create_token_response(self):
         """Create token response for refresh_token."""
@@ -143,11 +166,14 @@ class RotatingRefreshTokenGrant(_BaseTenantGrant):
                 "uid": uid,
                 "refresh_token": self._refresh_token or "",
                 "attestation": self._attestation_meta,
+                "dpop_jkt": self._dpop_jkt,
                 "realm": uid,
             },
         )
         token_data: dict[str, Any] = {}
         await self.server.save_token(token_data, self.request)
+        if self._dpop_jkt:
+            token_data["token_type"] = "DPoP"
         # Core server appends no-store headers; avoid duplication here
         return 200, token_data, []
 

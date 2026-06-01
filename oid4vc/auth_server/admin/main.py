@@ -29,6 +29,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Load wallet providers into JWKS cache
     async with db_manager.session() as session:
         from admin.services.internal_service import load_wallet_providers
+
         await load_wallet_providers(session)
     # Warn if encryption keys are not configured; secrets will be stored in plaintext
     try:

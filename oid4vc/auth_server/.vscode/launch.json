@@ -20,7 +20,8 @@
                 "--proxy-headers",
                 "--forwarded-allow-ips=*"
             ],
-            "jinja": true
+            "jinja": true,
+            "justMyCode": false
         },
         {
             "name": "Tenant API",
@@ -38,7 +39,8 @@
                 "--proxy-headers",
                 "--forwarded-allow-ips=*"
             ],
-            "jinja": true
+            "jinja": true,
+            "justMyCode": false
         }
     ]
 }

@@ -58,6 +58,10 @@ async def build_oauth_auth_server(uid: str, request: Request) -> dict:
         "jwks_uri": f"{well_known_base_url}/jwks.json/tenants/{uid}",
     }
 
+    # DPoP support (RFC 9449 §5)
+    if settings.DPOP_REQUIRED or settings.DPOP_NONCE_SECRET:
+        doc["dpop_signing_alg_values_supported"] = ["ES256", "ES384"]
+
     if is_internal_request(request):
         doc["introspection_endpoint"] = f"{base_url}/introspect"
         doc["introspection_endpoint_auth_methods_supported"] = [
