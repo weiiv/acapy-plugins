@@ -45,7 +45,6 @@ async def build_oauth_auth_server(uid: str, request: Request) -> dict:
         "token_endpoint": f"{base_url}/token",
         "response_types_supported": [],
         "token_endpoint_auth_methods_supported": [
-            "none",
             "attest_jwt_client_auth",
         ],
         "token_endpoint_auth_signing_alg_values_supported": list(SUPPORTED_SIGNING_ALGS),
