@@ -12,8 +12,11 @@ from authlib.oauth2.rfc9449 import DPoPProofValidator
 from authlib.oauth2.rfc9449.errors import InvalidDPopProofError, UseDPoPNonceError
 from authlib.oauth2.rfc9449.validator import normalize_url
 
+from core.utils.logging import get_logger
 from tenant.config import settings
 from tenant.security.dpop import HmacDPoPNonceGenerator
+
+logger = get_logger(__name__)
 
 
 class _FixedDPoPProofValidator(DPoPProofValidator):
@@ -29,12 +32,23 @@ class _FixedDPoPProofValidator(DPoPProofValidator):
         # Use lowercase key since Starlette normalizes headers
         proof = request.headers.get("dpop")
         if not proof:
+            logger.debug(
+                "DPoP proof missing (method=%s uri=%s for_resource=%s)",
+                request.method,
+                request.uri,
+                for_resource,
+            )
             raise InvalidDPopProofError(
                 "DPoP proof required", algs=self.algs, for_resource=for_resource
             )
 
         # Validation 1
         if len(proof.split(",")) > 1:
+            logger.debug(
+                "DPoP header has multiple proofs: count=%d (method=%s)",
+                len(proof.split(",")),
+                request.method,
+            )
             raise InvalidDPopProofError(
                 "DPoP header must contain a single proof",
                 algs=self.algs,
@@ -62,14 +76,32 @@ class _FixedDPoPProofValidator(DPoPProofValidator):
             hdr_seg = proof.split(".")[0]
             hdr_seg += "=" * (-len(hdr_seg) % 4)
             unverified_header = json.loads(base64.urlsafe_b64decode(hdr_seg))
-        except Exception:
+        except Exception as ex:
+            logger.debug(
+                "DPoP header decode failed: %s (proof_len=%d)",
+                ex,
+                len(proof),
+                exc_info=True,
+            )
             raise InvalidDPopProofError(
                 description="DPoP malformed proof",
                 algs=self.algs,
                 for_resource=for_resource,
             )
 
+        logger.debug(
+            "DPoP header: typ=%s alg=%s kid=%s has_jwk=%s",
+            unverified_header.get("typ"),
+            unverified_header.get("alg"),
+            unverified_header.get("kid"),
+            "jwk" in unverified_header,
+        )
+
         if "jwk" not in unverified_header:
+            logger.debug(
+                "DPoP header missing 'jwk': header_keys=%s",
+                sorted(unverified_header.keys()),
+            )
             raise InvalidDPopProofError(
                 description="DPoP missing 'jwk' header",
                 algs=self.algs,
@@ -81,6 +113,12 @@ class _FixedDPoPProofValidator(DPoPProofValidator):
 
         # Validation 7
         if not key.public_only:
+            jwk_hdr = unverified_header.get("jwk") or {}
+            logger.debug(
+                "DPoP 'jwk' contains private material: kty=%s crv=%s",
+                jwk_hdr.get("kty") if isinstance(jwk_hdr, dict) else None,
+                jwk_hdr.get("crv") if isinstance(jwk_hdr, dict) else None,
+            )
             raise InvalidDPopProofError(
                 "DPoP 'jwk' not a public key", algs=self.algs, for_resource=for_resource
             )
@@ -93,6 +131,15 @@ class _FixedDPoPProofValidator(DPoPProofValidator):
             )
             claims.validate(leeway=30)
         except JoseError as error:
+            logger.debug(
+                "DPoP claims/signature validation failed: %s "
+                "(method=%s htu=%s ath_expected=%s)",
+                error.description,
+                request.method,
+                uri,
+                bool(access_token),
+                exc_info=True,
+            )
             raise InvalidDPopProofError(
                 description=f"DPoP {error.description.lower()}",
                 algs=self.algs,
@@ -102,17 +149,34 @@ class _FixedDPoPProofValidator(DPoPProofValidator):
         # Validation 10 — nonce
         if self.nonce_generator:
             if "nonce" not in claims:
+                logger.debug(
+                    "DPoP nonce required but missing: jti=%s",
+                    claims.get("jti"),
+                )
                 raise UseDPoPNonceError(
                     self.nonce_generator.next(), for_resource=for_resource
                 )
             elif not self.nonce_generator.check(claims["nonce"]):
+                logger.debug(
+                    "DPoP nonce stale/invalid: jti=%s",
+                    claims.get("jti"),
+                )
                 raise UseDPoPNonceError(
                     self.nonce_generator.next(),
                     description="DPoP invalid claim 'nonce'",
                     for_resource=for_resource,
                 )
 
-        return key.thumbprint()
+        jkt = key.thumbprint()
+        logger.debug(
+            "DPoP proof verified: jkt=%s jti=%s htm=%s htu=%s ath_bound=%s",
+            jkt,
+            claims.get("jti"),
+            request.method,
+            uri,
+            bool(access_token),
+        )
+        return jkt
 
 
 # Module-level singleton — initialized lazily on first use
