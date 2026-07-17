@@ -139,15 +139,11 @@ async def _lookup_provider_key(
                 return None
             data = resp.json()
             if not data.get("found"):
-                logger.debug(
-                    "Provider lookup not found iss=%s kid=%s", iss, kid
-                )
+                logger.debug("Provider lookup not found iss=%s kid=%s", iss, kid)
                 return None
             # Single key when kid was specified
             if kid:
-                logger.debug(
-                    "Provider lookup hit iss=%s kid=%s (single key)", iss, kid
-                )
+                logger.debug("Provider lookup hit iss=%s kid=%s (single key)", iss, kid)
                 return data.get("public_key")
             # All keys when kid was absent
             keys = data.get("keys") or []
@@ -262,9 +258,7 @@ async def validate_client_attestation(
     # 4. Look up provider key(s) by iss + optional kid (§9 step 5)
     provider_key = await _lookup_provider_key(issuer, kid or None)
     if not provider_key:
-        logger.debug(
-            "Attestation provider untrusted/unknown: iss=%s kid=%s", issuer, kid
-        )
+        logger.debug("Attestation provider untrusted/unknown: iss=%s kid=%s", issuer, kid)
         raise InvalidAttestationError(description="untrusted_provider")
 
     # 5. Verify signature using provider's public key (§9 step 5)
@@ -340,9 +334,7 @@ async def validate_client_attestation(
     # --- Attestation PoP JWT validation (§5.2, §9 steps 7-10) ---
 
     if not client_attestation_pop:
-        logger.debug(
-            "Attestation PoP missing: iss=%s sub=%s", issuer, subject
-        )
+        logger.debug("Attestation PoP missing: iss=%s sub=%s", issuer, subject)
         raise InvalidAttestationError(description="missing_client_attestation_pop")
 
     # 9. Validate PoP typ header
