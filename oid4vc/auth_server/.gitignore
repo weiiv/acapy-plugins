@@ -203,8 +203,13 @@ cython_debug/
 .env.*
 !.env.*.example
 
+<<<<<<< Updated upstream
 # Demo notebook key store
 .demo_keys.json
+=======
+# Local demo/dev key material
+resources/.demo_keys.json
+>>>>>>> Stashed changes
 
 # Local test/analysis artifacts
 .test-reports/
