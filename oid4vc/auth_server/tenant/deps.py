@@ -22,7 +22,8 @@ from tenant.config import settings
 _CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _MAX_CACHE = 256
 _TTL = settings.CONTEXT_CACHE_TTL
-_UID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+# Allowlist blocks / \ % and null — the only chars that enable URL path traversal
+_UID_RE = re.compile(r"^[a-zA-Z0-9._-]{1,64}$")
 
 
 @with_retries(
