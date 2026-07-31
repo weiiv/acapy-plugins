@@ -1,218 +1,113 @@
-# MSO MDOC Credential Format
+# mso_mdoc
 
-Implementation of ISO/IEC 18013-5:2021 compliant mobile document (mDoc) credential format for ACA-Py.
+ISO/IEC 18013-5:2021 compliant mobile document (mDoc) credential format for ACA-Py, integrated with the OID4VCI plugin.
 
 ## Overview
 
-This module provides support for issuing and verifying mobile documents (mDocs) as defined in ISO 18013-5, including mobile driver's licenses (mDL) and other identity credentials. The implementation uses the `isomdl-uniffi` library for core mDoc operations and integrates with ACA-Py's credential issuance framework.
-
-## Features
-
-- **ISO 18013-5 Compliance**: Full compliance with the international standard for mobile documents
-- **CBOR Encoding**: Efficient binary encoding using CBOR (RFC 8949)
-- **COSE Signing**: Cryptographic protection using COSE (RFC 8152/9052)
-- **Selective Disclosure**: Privacy-preserving attribute disclosure
-- **OpenID4VCI Integration**: Seamless integration with OpenID for Verifiable Credential Issuance
-
-## Protocol Support
-
-- ISO/IEC 18013-5:2021 - Mobile driving licence (mDL) application
-- RFC 8152 - CBOR Object Signing and Encryption (COSE)
-- RFC 9052 - CBOR Object Signing and Encryption (COSE): Structures and Process
-- RFC 8949 - Concise Binary Object Representation (CBOR)
-- OpenID4VCI 1.0 - Verifiable Credential Issuance Protocol
+Issues and verifies mDocs (including mDLs) using the [`isomdl-uniffi`](https://github.com/Indicio-tech/isomdl-uniffi) Rust library via UniFFI bindings. Signing uses the two-step `PreparedMdoc` API so the issuer private key never crosses the FFI boundary — enabling software wallet keys, HSM-backed keys (via `kmslite`), or any `BaseWallet.sign_message`-compatible backend.
 
 ## Installation
 
-The mso_mdoc module is included as part of the oid4vc plugin. Dependencies are managed through UV:
+`isomdl-uniffi` ships as a platform-specific wheel and must be installed separately:
 
-```toml
-dependencies = [
-    "cbor2>=5.4.3",
-    "cwt>=1.6.0",
-    "pycose>=1.0.0",
-    "isomdl-uniffi @ git+https://github.com/Indicio-tech/isomdl-uniffi.git@feat/x509#subdirectory=python",
-]
+```bash
+# Linux x86_64 (used in Docker)
+pip install https://github.com/Indicio-tech/isomdl-uniffi/releases/download/v0.1.0-indicio.1/isomdl_uniffi-0.1.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+
+# macOS (Intel/Apple Silicon)
+pip install https://github.com/Indicio-tech/isomdl-uniffi/releases/download/v0.1.0-indicio.1/isomdl_uniffi-0.1.0-py3-none-macosx_11_0_universal2.whl
 ```
 
-## Usage
+## Key Management
 
-### Credential Issuance
+mso_mdoc follows the same convention as `jwt_vc_json` and `sd_jwt_vc` — the issuer key lives in the wallet and is referenced by DID. Set `issuer_did` on the `SupportedCredential`; at signing time the verkey and X.509 certificate are resolved automatically from `DIDInfo.metadata` (`x509_certificate_pem` stored by `POST /kmslite/did/{did}/certificate`).
 
-The module automatically registers the `MsoMdocCredProcessor` with the credential processor registry:
-
-```python
-from mso_mdoc.cred_processor import MsoMdocCredProcessor
-
-# The processor handles mso_mdoc format credentials
-processor = MsoMdocCredProcessor()
+```
+POST /kmslite/did/create              →  { verkey, did }
+POST /kmslite/did/{did}/csr           →  submit to IACA
+POST /kmslite/did/{did}/certificate   →  binds cert to DIDInfo.metadata
+POST /oid4vci/credential-supported/create/mso-mdoc  →  { ..., "issuer_did": "did:web:..." }
 ```
 
-### Supported Document Types
+### Signing Flow
 
-Common document type identifiers:
-- `org.iso.18013.5.1.mDL` - Mobile driver's license
-- Custom organizational document types following the reverse domain notation
+```mermaid
+sequenceDiagram
+    participant Wallet as Wallet
+    participant Issuer as mso_mdoc
+    participant AcaPy as ACA-Py Wallet (Askar/Kanon)
+    participant KMS as External Signer (HSM via kmslite)
+    participant FFI as isomdl-uniffi
 
-### Configuration
+    Wallet->>Issuer: POST /credential (with holder JWK)
+    Issuer->>AcaPy: wallet.get_local_did(issuer_did)
+    AcaPy-->>Issuer: DIDInfo { verkey, x509_certificate_pem }
+    Issuer->>FFI: prepared = PreparedMdoc(doctype, namespaces, holder_jwk, "ES256")
+    FFI-->>Issuer: tbs_bytes (COSE Sig_Structure to sign)
+    Issuer->>AcaPy: wallet.sign_message(tbs_bytes, verkey)
+    opt HSM-backed key (kmslite configured)
+        AcaPy->>KMS: signer.sign(key_ref, tbs_bytes)
+        KMS-->>AcaPy: raw r‖s signature
+    end
+    AcaPy-->>Issuer: raw r‖s signature
+    Issuer->>FFI: prepared.complete(x509_certificate_pem, signature)
+    FFI-->>Issuer: signed Mdoc
+    Issuer-->>Wallet: base64url-encoded IssuerSigned mDoc
+```
 
-Credentials are configured through the OpenID4VCI credential configuration:
+## Trust Anchors
 
+IACA root certificates used for verification are stored as `TrustAnchorRecord` records:
+
+```
+POST   /mso-mdoc/trust-anchors
+GET    /mso-mdoc/trust-anchors
+GET    /mso-mdoc/trust-anchors/{trust_anchor_id}
+DELETE /mso-mdoc/trust-anchors/{trust_anchor_id}
+```
+
+## Credential Configuration
+
+Register a supported credential via the OID4VCI routes:
+
+```
+POST /oid4vci/credential-supported/create/mso-mdoc
+```
+
+Example body:
 ```json
 {
   "format": "mso_mdoc",
+  "id": "org.iso.18013.5.1.mDL",
   "doctype": "org.iso.18013.5.1.mDL",
-  "cryptographic_binding_methods_supported": ["jwk"],
-  "credential_signing_alg_values_supported": ["ES256"]
+  "cryptographic_binding_methods_supported": ["cose_key"],
+  "credential_signing_alg_values_supported": ["ES256"],
+  "issuer_did": "did:web:issuer.example.com"
 }
 ```
 
-## Architecture
+## Module Structure
 
-### Core Components
-
-- **`cred_processor.py`**: Main credential processor implementing the `Issuer` interface
-- **`storage.py`**: Persistent storage for keys and certificates
-- **`key_generation.py`**: Cryptographic key generation utilities
-- **`mdoc/issuer.py`**: mDoc issuance operations
-- **`mdoc/verifier.py`**: mDoc verification operations
-
-### Key Management
-
-The module supports:
-- Automatic EC P-256 key generation
-- Persistent key storage with metadata
-- Certificate generation and management
-- Verification method resolution
-
-## API Endpoints
-
-The module provides REST API endpoints for mDoc operations:
-
-### Sign mDoc
 ```
-POST /oid4vc/mdoc/sign
+mso_mdoc/
+├── cred_processor.py       # MsoMdocCredProcessor: Issuer + CredVerifier + PresVerifier
+├── trust_anchor.py         # TrustAnchorRecord (IACA root certs)
+├── trust_anchor_routes.py  # /mso-mdoc/trust-anchors routes
+├── routes.py               # /oid4vci/credential-supported mso-mdoc CRUD routes
+├── payload.py              # Payload normalisation for isomdl-uniffi
+├── mdoc/
+│   ├── issuer.py           # isomdl_mdoc_sign, make_wallet_signer
+│   ├── cred_verifier.py    # MsoMdocCredVerifier
+│   ├── pres_verifier.py    # MsoMdocPresVerifier
+│   ├── mdoc_verify.py      # mdoc_verify helper
+│   └── utils.py            # PEM chain helpers
+└── tests/
 ```
 
-Request body:
-```json
-{
-    "payload": {
-        "doctype": "org.iso.18013.5.1.mDL",
-        "claims": {
-            "org.iso.18013.5.1": {
-                "family_name": "Doe",
-                "given_name": "John",
-                "birth_date": "1990-01-01",
-                "age_over_18": true
-            }
-        }
-    },
-    "headers": {
-        "alg": "ES256"
-    },
-    "verificationMethod": "did:key:z6Mkn6z3Eg2mrgQmripNPGDybZYYojwZw1VPjRkCzbNV7JfN#0"
-}
-```
+## Running Tests
 
-### Verify mDoc
-```
-POST /oid4vc/mdoc/verify
-```
-
-Request body:
-```json
-{
-    "mDoc": "<base64-encoded-mdoc>",
-    "nonce": "optional-nonce"
-}
-```
-
-## Testing
-
-Comprehensive test coverage including:
-- Unit tests for all components
-- Integration tests with real mDoc operations
-- Real functional tests with actual cryptographic operations
-- Compliance tests against ISO 18013-5 requirements
-
-Run tests:
 ```bash
 cd oid4vc
 uv run pytest mso_mdoc/tests/ -v
 ```
 
-Test categories:
-- **Unit Tests**: Individual component testing
-- **Integration Tests**: Cross-component functionality
-- **Real Tests**: Actual mDoc operations with isomdl-uniffi
-- **Storage Tests**: Persistent storage operations
-- **Security Tests**: Cryptographic validation
-
-## Security Considerations
-
-- All cryptographic operations use industry-standard libraries
-- Keys are generated using secure random sources (P-256 ECDSA)
-- Private keys are stored securely in ACA-Py's encrypted wallet
-- No hardcoded credentials or keys
-- Full compliance with ISO 18013-5 security requirements
-- COSE signing for tamper detection
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Import Errors**: Ensure `isomdl-uniffi` is properly installed
-2. **Key Generation Failures**: Check that the wallet is properly initialized
-3. **CBOR Encoding Errors**: Verify data types match ISO 18013-5 requirements
-4. **Signature Verification Failures**: Ensure proper key material and algorithm support
-
-### Debug Mode
-
-Enable debug logging for detailed operation information:
-
-```python
-import logging
-
-logging.getLogger("mso_mdoc").setLevel(logging.DEBUG)
-```
-
-## Contributing
-
-When contributing to this module:
-
-1. **Ensure ISO 18013-5 compliance** - All changes must maintain standard compliance
-2. **Add comprehensive tests** - Both unit and integration tests for new features
-3. **Update documentation** - Keep API documentation current
-4. **Run security scans** - Use `bandit` to check for security issues
-5. **Format code** - Use `black` and `isort` for consistent formatting
-6. **Type hints** - Maintain complete type annotations
-
-### Development Setup
-
-```bash
-# Install development dependencies
-uv sync --dev
-
-# Run tests
-cd oid4vc
-uv run pytest mso_mdoc/tests/
-
-# Run security scan
-uv run bandit -r mso_mdoc/ -x "*/tests/*"
-
-# Format code
-uv run black mso_mdoc/
-uv run isort mso_mdoc/
-```
-
-## License
-
-This module is part of the Aries ACA-Py plugins project and follows the same licensing terms.
-
-## References
-
-- [ISO/IEC 18013-5:2021](https://www.iso.org/standard/69084.html) - Mobile driving licence (mDL) application
-- [OpenID for Verifiable Credential Issuance](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html)
-- [RFC 8152 - CBOR Object Signing and Encryption (COSE)](https://tools.ietf.org/html/rfc8152)
-- [RFC 8949 - Concise Binary Object Representation (CBOR)](https://tools.ietf.org/html/rfc8949)
