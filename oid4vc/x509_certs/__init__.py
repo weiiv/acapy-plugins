@@ -8,7 +8,7 @@ import logging
 
 from acapy_agent.config.injection_context import InjectionContext
 
-from .certs import X509Error, embedded_x5c, select_certificate
+from .certs import X509Error, embedded_x5c, pem_chain, select_certificate
 from .models import (
     ANCHOR_PURPOSE_FOR,
     ANCHOR_PURPOSES,
@@ -25,6 +25,7 @@ __all__ = [
     "X509Error",
     "X509TrustAnchorRecord",
     "embedded_x5c",
+    "pem_chain",
     "select_certificate",
 ]
 

@@ -160,7 +160,7 @@ The exchange provides the signing key for all three processors. The supported cr
 | Path | Signing key given as | Certificates found by |
 | --- | --- | --- |
 | Multikey (recommended for new users) | `signing_multikey` on the exchange | The multikey |
-| DID (backward compatibility) | Exchange `did` or `verification_method`: `did:jwk` or `did:web` | Not selected; SD-JWT VC keeps today's static `x5c_cert_chain` or `kid` |
+| DID (backward compatibility) | Exchange `did` or `verification_method`: `did:jwk` or `did:web` | Not selected; SD-JWT VC keeps today's static `x5c_cert_chain` or `kid`. Not available for `mso_mdoc`, which always needs a certificate |
 
 If `signing_multikey` is present, it is used and `did`/`verification_method` are ignored for signing.
 
@@ -173,23 +173,25 @@ At issuance on the multikey path, after computing the credential's expiry, the p
 3. Picks the one with the earliest `not_after`; on a tie, the earlier `not_before`.
 4. Fails the issuance if none qualifies.
 
-SD-JWT VC puts the chain in the `x5c` header; mdoc decodes it to DER for `x5chain`. `jwt_vc_json` embeds no certificate. The embedded chain leaves out a self-signed root at its end, because HAIP 1.0 (Section 6.1.1) forbids the trust anchor in `x5c`; the stored chain may include it.
+SD-JWT VC puts the chain in the `x5c` header; mdoc passes it as PEM for `x5chain`. `jwt_vc_json` embeds no certificate. The embedded chain leaves out a self-signed root at its end, because HAIP 1.0 (Section 6.1.1) forbids the trust anchor in `x5c`; the stored chain may include it.
+
+For mdoc, isomdl sets the MSO validity (30 days in `isomdl-uniffi` 0.1.0), so the certificate is selected after the mdoc is prepared, using `validityInfo.validUntil` read from the payload to be signed.
 
 ### Changes
 
 | Where | Change |
 | --- | --- |
-| Exchange creation | Add optional `signing_multikey` and `issuer_id`. If `signing_multikey` is present, use it; `issuer_id` is required only for `jwt_vc_json`. Otherwise require `did` or `verification_method` and behave as today. Make the exchange record's `verification_method` and `issuer_id` optional. |
+| Exchange creation | Add optional `signing_multikey` and `issuer_id`. If `signing_multikey` is present, use it; `issuer_id` is required only for `jwt_vc_json`. Otherwise require `did` or `verification_method` and behave as today; `mso_mdoc` exchanges require `signing_multikey`. Make the exchange record's `verification_method` and `issuer_id` optional. |
 | `jwt_sign` | Add an optional keyword `verkey`: read the key type from `get_signing_key`, sign with `sign_message`, and add no `kid` unless the caller supplies one. For a `did:jwk` with no DID record, decode the JWK from the identifier to get the verkey; a DID record, when present, is used first. |
 | `sd_jwt_sign` | Pass `verkey` through as a keyword. |
 | `sd_jwt_vc` | On the multikey path, use certificate selection for `x5c`; without a qualifying certificate the issuance fails, since the credential would carry neither `x5c` nor `kid`. A static `x5c_cert_chain` in the supported credential still takes precedence. Omit `iss` when the exchange has no `issuer_id`. |
 | `jwt_vc_json` | On the multikey path, call `jwt_sign(verkey=...)` with `iss` and `vc.issuer` set to `issuer_id`. |
-| `mso_mdoc` | Sign with the exchange's signing key. Remove `issuer_did` from `vc_additional_data` and its route schemas. Remove the device-key fallback to the exchange `verification_method`; the holder must supply the device key in the proof. Use certificate selection; remove the `x509_certificate_pem` DID-metadata lookup, which has no production data. |
+| `mso_mdoc` | Sign with the exchange's `signing_multikey`, which must be P-256. Remove `issuer_did` from `vc_additional_data` and its route schemas. Remove the device-key fallback to the exchange `verification_method`; the holder must supply the device key in the proof. Use certificate selection; remove the `x509_certificate_pem` DID-metadata lookup, which has no production data. Verify against `x509_certs` trust anchors with purpose `iaca`. |
 
 Compatibility:
 
 - `jwt_vc_json` and `sd_jwt_vc`: additive. Requests without `signing_multikey` behave as today.
-- `mso_mdoc`: breaking. The supported credential's `issuer_did` is no longer read, so the exchange's `did`, `verification_method` or `signing_multikey` selects the signing key, and issuance fails if the holder supplies no device key.
+- `mso_mdoc`: breaking. The supported credential's `issuer_did` is no longer read; exchanges must give `signing_multikey`, and issuance fails if the holder supplies no device key.
 - Stored records load through the record constructor, not the schema (`BaseRecord.from_storage`). Old exchange records load under the new code. After a rollback, the old constructor raises `TypeError` on any stored `signing_multikey` key, so the record stores it only when set: DID-path records still load, and multikey-path records do not.
 
 ## DIDs
@@ -209,9 +211,9 @@ Future OID4VC issuance does not depend on DIDs. For backward compatibility, the 
 ## mso_mdoc Cleanup
 
 - `mso_mdoc` signs only with wallet keys, Askar or HSM.
-- Its certificate, key, and trust-anchor endpoints are removed once the `x509_certs` plugin is in place. `/mso-mdoc/signing-keys` is already removed; `/mso-mdoc/trust-anchors` remains until then.
-- mdoc verification then reads `x509_certs` trust anchors with purpose `iaca` only, as it reads `mso_mdoc` anchors today.
-- For upstream users of `/mso-mdoc/signing-keys` this is a breaking change: private keys are not imported, so they create new wallet or HSM keys and obtain new certificates.
+- Its certificate, key, and trust-anchor endpoints are removed: `/mso-mdoc/signing-keys` and `/mso-mdoc/trust-anchors`, with their records.
+- mdoc verification reads `x509_certs` trust anchors with purpose `iaca` only, as it read `mso_mdoc` anchors before.
+- For upstream users of `/mso-mdoc/signing-keys` this is a breaking change: private keys are not imported, so they create new wallet or HSM keys and obtain new certificates. Anchors stored through `/mso-mdoc/trust-anchors` are re-imported through `/x509/trust-anchors`.
 
 ## End-to-End Flow (SD-JWT VC, HSM key)
 
