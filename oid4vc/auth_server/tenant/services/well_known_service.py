@@ -44,9 +44,7 @@ async def build_oauth_auth_server(uid: str, request: Request) -> dict:
         "issuer": base_url,
         "token_endpoint": f"{base_url}/token",
         "response_types_supported": [],
-        "token_endpoint_auth_methods_supported": [
-            "attest_jwt_client_auth",
-        ],
+        "token_endpoint_auth_methods_supported": ["none"],
         "token_endpoint_auth_signing_alg_values_supported": list(SUPPORTED_SIGNING_ALGS),
         "grant_types_supported": [
             OAuth2GrantType.PRE_AUTH_CODE,
@@ -57,8 +55,20 @@ async def build_oauth_auth_server(uid: str, request: Request) -> dict:
         "jwks_uri": f"{well_known_base_url}/jwks.json/tenants/{uid}",
     }
 
+    if settings.ATTESTATION_ENABLED:
+        if settings.ATTESTATION_REQUIRED:
+            doc["token_endpoint_auth_methods_supported"] = ["attest_jwt_client_auth"]
+        else:
+            doc["token_endpoint_auth_methods_supported"].append("attest_jwt_client_auth")
+        doc["client_attestation_signing_alg_values_supported"] = list(
+            SUPPORTED_SIGNING_ALGS
+        )
+        doc["client_attestation_pop_signing_alg_values_supported"] = list(
+            SUPPORTED_SIGNING_ALGS
+        )
+
     # DPoP support (RFC 9449 §5)
-    if settings.DPOP_REQUIRED or settings.DPOP_NONCE_SECRET:
+    if settings.DPOP_ENABLED:
         doc["dpop_signing_alg_values_supported"] = ["ES256", "ES384"]
 
     if is_internal_request(request):

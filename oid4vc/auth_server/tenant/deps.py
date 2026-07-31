@@ -53,6 +53,8 @@ async def _fetch_tenant_ctx(uid: str | None = None) -> dict:
     """Fetch tenant DB + JWKS from admin, update local cache."""
     if not uid:
         raise HTTPException(status_code=400, detail="Missing tenant uid.")
+    if not _UID_RE.match(uid):
+        raise HTTPException(status_code=400, detail="invalid_tenant")
 
     base = f"{settings.INTERNAL_BASE_URL}/tenants/{uid}"
     headers = internal_api_headers(settings.INTERNAL_AUTH_TOKEN)
