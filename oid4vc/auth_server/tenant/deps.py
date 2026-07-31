@@ -1,5 +1,6 @@
 """Tenant deps: DB session + JWKS resolution, cached per uid."""
 
+import re
 import time
 from collections import OrderedDict
 from typing import AsyncIterator
@@ -21,6 +22,8 @@ from tenant.config import settings
 _CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _MAX_CACHE = 256
 _TTL = settings.CONTEXT_CACHE_TTL
+# Allowlist blocks / \ % and null — the only chars that enable URL path traversal
+_UID_RE = re.compile(r"^[a-zA-Z0-9._-]{1,64}$")
 
 
 @with_retries(
