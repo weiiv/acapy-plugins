@@ -1,6 +1,6 @@
 """MDoc module."""
 
-from .issuer import MDL_MANDATORY_FIELDS, isomdl_mdoc_sign, parse_mdoc
+from .issuer import MDL_MANDATORY_FIELDS, isomdl_mdoc_sign, make_wallet_signer, parse_mdoc
 from .mdoc_verify import MdocVerifyResult, mdoc_verify
 from .utils import extract_signing_cert, flatten_trust_anchors, split_pem_chain
 from .cred_verifier import MsoMdocCredVerifier, PreverifiedMdocClaims

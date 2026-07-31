@@ -20,19 +20,9 @@ credential format that follows the ISO 18013-5 mobile document structure.
 
 import json
 import logging
-from typing import Any, Mapping, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
-# ISO 18013-5 § 8.4: Presentation session
-# ISO 18013-5 § 9.1.3.5: ECDSA P-256 key pairs
-# ISO 18013-5 § 8.4.1: Session establishment
-# ISO 18013-5 § 8.4.2: Response handling
-# Test mDL generation for ISO 18013-5 compliance
-# Import ISO 18013-5 compliant mDoc operations from isomdl-uniffi
-# These provide cryptographically secure implementations of:
-# - mDoc creation and signing (ISO 18013-5 § 8.3)
-# - Presentation protocols (ISO 18013-5 § 8.4)
-# - P-256 elliptic curve cryptography (ISO 18013-5 § 9.1.3.5)
-from isomdl_uniffi import Mdoc  # ISO 18013-5 § 8.3: Mobile document structure
+from isomdl_uniffi import Mdoc, PreparedMdoc
 
 from .utils import extract_signing_cert
 
@@ -112,34 +102,44 @@ def _prepare_generic_namespaces(doctype: str, payload: Mapping[str, Any]) -> dic
     return {doctype: encoded_payload}
 
 
-def isomdl_mdoc_sign(
+def make_wallet_signer(wallet: Any, verkey: str) -> Callable[[bytes], Awaitable[bytes]]:
+    """Wrap a wallet verkey as an async signer for isomdl_mdoc_sign.
+
+    Delegates to BaseWallet.sign_message, which dispatches to the registered
+    SignerRegistry backend (HSM via kmslite, or in-wallet software key).
+    """
+
+    async def _sign(tbs: bytes) -> bytes:
+        return await wallet.sign_message(tbs, verkey)
+
+    return _sign
+
+
+async def isomdl_mdoc_sign(
     jwk: dict,
     headers: Mapping[str, Any],
     payload: Mapping[str, Any],
     iaca_cert_pem: str,
-    iaca_key_pem: str,
+    signer: Callable[[bytes], Awaitable[bytes]],
+    signature_algorithm: str = "ES256",
 ) -> str:
-    """Create a signed mso_mdoc using isomdl-uniffi.
+    """Create a signed mso_mdoc using isomdl-uniffi's two-step PreparedMdoc API.
 
-    Creates and signs a mobile security object (MSO) compliant with
-    ISO 18013-5 § 9.1.3. The signing uses ECDSA with P-256 curve (ES256)
-    as mandated by ISO 18013-5 § 9.1.3.5 for mDoc cryptographic protection.
-
-    Protocol Compliance:
-    - ISO 18013-5 § 9.1.3: Mobile security object (MSO) structure
-    - ISO 18013-5 § 9.1.3.5: ECDSA P-256 signature algorithm
-    - RFC 8152: COSE signing for MSO authentication
-    - RFC 7517: JWK format for key material input
+    The caller supplies an async *signer* callable — any backend that can
+    produce raw r‖s bytes over the TBS payload (PEM key, HSM, wallet) works.
+    Private key material never needs to cross the FFI boundary.
 
     Args:
-        jwk: The signing key in JWK format
-        headers: Header parameters including doctype
-        payload: The credential data to sign
-        iaca_cert_pem: Issuer certificate in PEM format
-        iaca_key_pem: Issuer private key in PEM format
+        jwk: Holder device key in JWK format.
+        headers: Must include ``doctype``.
+        payload: Credential data to sign.
+        iaca_cert_pem: Issuer certificate in PEM format (chain or single cert).
+        signer: Async callable ``(tbs: bytes) -> bytes`` returning raw r‖s.
+        signature_algorithm: COSE algorithm name — ``"ES256"``, ``"ES384"``,
+            or ``"ES512"``.  Defaults to ``"ES256"`` (P-256 / ISO 18013-5).
 
     Returns:
-        CBOR-encoded mDoc as string
+        CBOR-encoded mDoc as base64url string (no padding).
     """
     if not isinstance(headers, dict):
         raise ValueError("missing headers.")
@@ -153,12 +153,8 @@ def isomdl_mdoc_sign(
 
         LOGGER.debug("holder_jwk: %s", holder_jwk)
         LOGGER.debug("iaca_cert_pem length: %d", len(iaca_cert_pem))
-        LOGGER.debug("iaca_key_pem length: %d", len(iaca_key_pem))
 
-        # If iaca_cert_pem contains a chain (multiple PEM blocks), Rust's
-        # x509_cert crate only reads the first certificate and silently drops
-        # everything after it.  Extract just the signing cert (first block)
-        # so Rust always receives a single, unambiguous certificate.
+        # Rust's x509_cert crate reads only the first PEM block in a chain.
         signing_cert_pem = extract_signing_cert(iaca_cert_pem)
         if signing_cert_pem != iaca_cert_pem:
             LOGGER.info(
@@ -167,36 +163,24 @@ def isomdl_mdoc_sign(
                 len(signing_cert_pem),
             )
 
-        # Prepare namespaces based on doctype
         if doctype == "org.iso.18013.5.1.mDL":
-            # Use the dedicated mDL constructor — accepts JSON strings and
-            # handles CBOR encoding internally (isomdl-uniffi >= create_and_sign_mdl)
             mdl_items, aamva_items = _prepare_mdl_namespaces(payload)
-            LOGGER.info("Creating mDL mdoc via create_and_sign_mdl")
-            mdoc = Mdoc.create_and_sign_mdl(
-                mdl_items,
-                aamva_items,
-                holder_jwk,
-                signing_cert_pem,
-                iaca_key_pem,
+            LOGGER.info("Creating mDL prepared mdoc via PreparedMdoc.new_mdl")
+            prepared = PreparedMdoc.new_mdl(
+                mdl_items, aamva_items, holder_jwk, signature_algorithm
             )
         else:
             namespaces = _prepare_generic_namespaces(doctype, payload)
-            LOGGER.info("Creating mdoc with namespaces: %s", list(namespaces.keys()))
-            mdoc = Mdoc.create_and_sign(
-                doctype,
-                namespaces,
-                holder_jwk,
-                signing_cert_pem,
-                iaca_key_pem,
-            )
+            LOGGER.info("Creating prepared mdoc with namespaces: %s", list(namespaces.keys()))
+            prepared = PreparedMdoc(doctype, namespaces, holder_jwk, signature_algorithm)
 
+        tbs = prepared.signature_payload()
+        LOGGER.debug("Signing %d-byte TBS payload", len(tbs))
+        sig = await signer(tbs)
+
+        mdoc = prepared.complete(signing_cert_pem, sig)
         LOGGER.info("Generated mdoc with doctype: %s", mdoc.doctype())
 
-        # Serialize as ISO 18013-5 §8.3 compliant IssuerSigned CBOR (camelCase keys,
-        # nameSpaces as arrays). issuer_signed_b64() uses the upstream IssuerSigned
-        # struct directly, which carries the correct serde renames, eliminating the
-        # need for any post-serialization key patching.
         return mdoc.issuer_signed_b64()
 
     except Exception as ex:

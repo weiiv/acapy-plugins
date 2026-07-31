@@ -23,12 +23,12 @@ from oid4vc.models.presentation import OID4VPPresentation
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.pop_result import PopResult
 
-from .mdoc.issuer import MDL_MANDATORY_FIELDS, isomdl_mdoc_sign
+from acapy_agent.wallet.base import BaseWallet
+from .mdoc.issuer import MDL_MANDATORY_FIELDS, isomdl_mdoc_sign, make_wallet_signer
 from .mdoc.cred_verifier import MsoMdocCredVerifier
 from .mdoc.pres_verifier import MsoMdocPresVerifier
 from .payload import normalize_mdoc_result, prepare_mdoc_payload
 from .trust_anchor import TrustAnchorRecord
-from .signing_key import MdocSigningKeyRecord
 
 __all__ = [
     "MsoMdocCredProcessor",
@@ -284,63 +284,32 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
     async def _resolve_signing_key(
         self,
         supported: SupportedCredential,
-        profile: Optional[Profile] = None,
+        wallet=None,
     ) -> Dict[str, Any]:
-        """Resolve the signing key for credential issuance.
-
-        Resolution order:
-        1. ``signing_key_id`` in ``vc_additional_data`` — fetch a specific
-           ``MdocSigningKeyRecord`` by ID.
-        2. ``MdocSigningKeyRecord`` query by doctype — first matching record.
-
-        Returns:
-            Dict with ``private_key_pem`` and ``certificate_pem``.
-        """
-        additional = supported.vc_additional_data or {}
-        doctype = (supported.format_data or {}).get("doctype")
-
-        # 1. Explicit signing key record ID
-        signing_key_id = additional.get("signing_key_id")
-        if signing_key_id and profile:
-            try:
-                async with profile.session() as session:
-                    key_record = await MdocSigningKeyRecord.retrieve_by_id(
-                        session, signing_key_id
-                    )
-                if key_record.private_key_pem and key_record.certificate_pem:
-                    return {
-                        "private_key_pem": key_record.private_key_pem,
-                        "certificate_pem": key_record.certificate_pem,
-                    }
-            except Exception as exc:
-                LOGGER.warning(
-                    "Could not load MdocSigningKeyRecord %s: %s", signing_key_id, exc
-                )
-
-        # 2. MdocSigningKeyRecord query by doctype (or any key if no doctype)
-        if profile:
-            try:
-                async with profile.session() as session:
-                    tag_filter = {"doctype": doctype} if doctype else None
-                    key_records = await MdocSigningKeyRecord.query(
-                        session, tag_filter=tag_filter
-                    )
-                    if not key_records and doctype:
-                        # fall back to wildcard keys (no doctype set)
-                        key_records = await MdocSigningKeyRecord.query(session)
-                    for key_record in key_records:
-                        if key_record.private_key_pem and key_record.certificate_pem:
-                            return {
-                                "private_key_pem": key_record.private_key_pem,
-                                "certificate_pem": key_record.certificate_pem,
-                            }
-            except Exception as exc:
-                LOGGER.debug("MdocSigningKeyRecord query failed: %s", exc)
-
-        raise CredProcessorError(
-            "No mDoc signing key configured. "
-            "Create a MdocSigningKeyRecord via POST /mso-mdoc/signing-keys."
-        )
+        """Resolve the issuer signing key from DIDInfo.metadata via issuer_did."""
+        issuer_did = (supported.vc_additional_data or {}).get("issuer_did")
+        if not issuer_did:
+            raise CredProcessorError(
+                "No issuer_did configured on the SupportedCredential. "
+                "Set issuer_did to the issuer DID (created via POST /kmslite/did/create)."
+            )
+        if not wallet:
+            raise CredProcessorError("Wallet not available for signing.")
+        try:
+            from acapy_agent.wallet.util import nym_to_did  # noqa: PLC0415
+            did_info = await wallet.get_local_did(nym_to_did(issuer_did))
+        except Exception as exc:
+            raise CredProcessorError(f"Could not resolve issuer DID {issuer_did!r}: {exc}") from exc
+        cert_pem = (did_info.metadata or {}).get("x509_certificate_pem")
+        if not cert_pem:
+            raise CredProcessorError(
+                f"No x509_certificate_pem in DIDInfo.metadata for {issuer_did}. "
+                "Bind a certificate via POST /kmslite/did/{did}/certificate first."
+            )
+        return {
+            "signer": make_wallet_signer(wallet, did_info.verkey),
+            "certificate_pem": cert_pem,
+        }
 
     async def _assign_status_entry(
         self,
@@ -453,10 +422,10 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
             if status_claim:
                 payload["status"] = status_claim
 
-            # Resolve signing key — check MdocSigningKeyRecord first, then
-            # fall back to vc_additional_data and env vars
-            key_data = await self._resolve_signing_key(supported, context.profile)
-            private_key_pem = key_data["private_key_pem"]
+            # Resolve signing key — wallet-backed via issuer_did
+            async with context.profile.session() as _session:
+                wallet = _session.inject(BaseWallet)
+            key_data = await self._resolve_signing_key(supported, wallet)
             certificate_pem = key_data["certificate_pem"]
 
             # Validity-period guard: reject expired or not-yet-valid certificates
@@ -516,8 +485,9 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
                     "Unable to resolve a holder JWK for device key binding."
                 )
 
-            mso_mdoc = isomdl_mdoc_sign(
-                signing_holder_key, headers, payload, certificate_pem, private_key_pem
+            signer = key_data["signer"]
+            mso_mdoc = await isomdl_mdoc_sign(
+                signing_holder_key, headers, payload, certificate_pem, signer
             )
 
             # Normalize mDoc result handling for robust string/bytes processing
