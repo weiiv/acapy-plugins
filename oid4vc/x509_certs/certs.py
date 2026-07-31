@@ -50,6 +50,11 @@ def to_pem(cert: x509.Certificate) -> str:
     return cert.public_bytes(Encoding.PEM).decode()
 
 
+def pem_chain(x5c: List[str]) -> str:
+    """Concatenated PEM for an x5c list, in the same order."""
+    return "".join(to_pem(cert) for cert in load_x5c(x5c))
+
+
 def is_issued_by(cert: x509.Certificate, issuer: x509.Certificate) -> bool:
     """Return whether `issuer` signed `cert`."""
     try:

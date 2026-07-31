@@ -264,6 +264,8 @@ async def create_exchange(request: web.Request, refresh_id: str | None = None):
         raise web.HTTPBadRequest(
             reason="issuer_id is required with signing_multikey for jwt_vc_json"
         )
+    if not signing_multikey and supported.format == "mso_mdoc":
+        raise web.HTTPBadRequest(reason="mso_mdoc exchanges require signing_multikey")
     try:
         processor.validate_credential_subject(supported, credential_subject)
     except (ValueError, CredProcessorError) as err:

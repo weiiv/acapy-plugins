@@ -29,7 +29,6 @@ from marshmallow import RAISE, ValidationError, fields
 from oid4vc.cred_processor import CredProcessors
 from oid4vc.models.supported_cred import SupportedCredential, SupportedCredentialSchema
 from oid4vc.routes import SupportedCredentialMatchSchema, supported_cred_is_unique
-from . import trust_anchor_routes
 
 LOGGER = logging.getLogger(__name__)
 
@@ -101,22 +100,6 @@ class MdocSupportedCredCreateRequestSchema(OpenAPISchema):
             },
         },
     )
-    trust_anchors = fields.List(
-        fields.Str,
-        required=False,
-        metadata={
-            "description": "PEM-encoded X.509 root CA certificates for verification.",
-        },
-    )
-    signing_key_id = fields.Str(
-        required=False,
-        metadata={
-            "description": (
-                "ID of a MdocSigningKeyRecord to use for signing. "
-                "Takes precedence over signing_key_pem/signing_cert_pem."
-            ),
-        },
-    )
     status_list_def_id = fields.Str(
         required=False,
         metadata={
@@ -167,19 +150,6 @@ class MdocSupportedCredUpdateRequestSchema(OpenAPISchema):
     )
     claims = fields.Dict(keys=fields.Str, required=False)
     credential_metadata = fields.Dict(required=False)
-    trust_anchors = fields.List(
-        fields.Str,
-        required=False,
-        metadata={
-            "description": "PEM-encoded X.509 root CA certificates for verification.",
-        },
-    )
-    signing_key_id = fields.Str(
-        required=False,
-        metadata={
-            "description": "ID of a MdocSigningKeyRecord to use for signing.",
-        },
-    )
     status_list_def_id = fields.Str(
         required=False,
         metadata={
@@ -230,8 +200,6 @@ async def supported_credential_create_mdoc(request: web.Request):
     format_data["claims"] = body.pop("claims", None)
 
     vc_additional_data = {}
-    vc_additional_data["trust_anchors"] = body.pop("trust_anchors", None)
-    vc_additional_data["signing_key_id"] = body.pop("signing_key_id", None)
     vc_additional_data["status_list_def_id"] = body.pop("status_list_def_id", None)
     vc_additional_data["status_list_base_uri"] = body.pop("status_list_base_uri", None)
 
@@ -296,14 +264,6 @@ async def mdoc_supported_cred_update_helper(
 
     # vc_additional_data — merge with existing
     vc_additional_data = dict(existing_vc_data)
-    if "trust_anchors" in body:
-        vc_additional_data["trust_anchors"] = body.pop("trust_anchors")
-    else:
-        body.pop("trust_anchors", None)
-    if "signing_key_id" in body:
-        vc_additional_data["signing_key_id"] = body.pop("signing_key_id")
-    else:
-        body.pop("signing_key_id", None)
     if "status_list_def_id" in body:
         vc_additional_data["status_list_def_id"] = body.pop("status_list_def_id")
     else:
@@ -399,4 +359,3 @@ async def register(app: web.Application):
             ),
         ]
     )
-    await trust_anchor_routes.register(app)

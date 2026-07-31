@@ -9,79 +9,43 @@ import base64
 import json
 import logging
 import re
-from datetime import UTC, datetime
-
-from cryptography import x509 as _x509
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from acapy_agent.admin.request_context import AdminRequestContext
 from acapy_agent.core.profile import Profile
+from acapy_agent.wallet.base import BaseWallet
+from acapy_agent.wallet.key_type import P256
+from acapy_agent.wallet.keys.manager import multikey_to_verkey
 
 from oid4vc.cred_processor import CredProcessorError, CredVerifier, Issuer, PresVerifier
 from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.presentation import OID4VPPresentation
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.pop_result import PopResult
+from x509_certs import (
+    X509Error,
+    X509TrustAnchorRecord,
+    embedded_x5c,
+    pem_chain,
+    select_certificate,
+)
 
-from .mdoc.issuer import MDL_MANDATORY_FIELDS, isomdl_mdoc_sign
+from .mdoc.issuer import MDL_MANDATORY_FIELDS, isomdl_mdoc_sign, make_wallet_signer
 from .mdoc.cred_verifier import MsoMdocCredVerifier
 from .mdoc.pres_verifier import MsoMdocPresVerifier
 from .payload import normalize_mdoc_result, prepare_mdoc_payload
-from .trust_anchor import TrustAnchorRecord
-from .signing_key import MdocSigningKeyRecord
 
-__all__ = [
-    "MsoMdocCredProcessor",
-    "check_certificate_not_expired",
-]
+__all__ = ["MsoMdocCredProcessor"]
 
 LOGGER = logging.getLogger(__name__)
 
 
-def check_certificate_not_expired(cert_pem: str) -> None:
-    """Validate that a PEM-encoded X.509 certificate is currently valid."""
-    if not cert_pem or not cert_pem.strip():
-        raise CredProcessorError("Empty certificate PEM string")
-
-    try:
-        cert = _x509.load_pem_x509_certificate(cert_pem.strip().encode())
-    except Exception as exc:
-        raise CredProcessorError(
-            f"Invalid certificate PEM — could not parse: {exc}"
-        ) from exc
-
-    now = datetime.now(UTC)
-    if cert.not_valid_before_utc > now:
-        nb = cert.not_valid_before_utc.isoformat()
-        raise CredProcessorError(f"Certificate is not yet valid (NotBefore={nb})")
-    if cert.not_valid_after_utc < now:
-        na = cert.not_valid_after_utc.isoformat()
-        raise CredProcessorError(f"Certificate has expired (NotAfter={na})")
-
-
-async def _get_trust_anchors(
-    profile: Profile,
-    doctype: Optional[str] = None,
-) -> List[str]:
-    """Collect trust anchor PEMs from TrustAnchorRecord storage.
-
-    Queries ``TrustAnchorRecord`` records with ``purpose="iaca"``.  When
-    *doctype* is provided, records whose ``doctype`` tag matches OR whose
-    ``doctype`` tag is ``None`` ("wildcard") are both included.
-    """
-    anchors: List[str] = []
-
+async def _get_trust_anchors(profile: Profile) -> List[str]:
+    """PEMs of the x509 trust anchors with purpose ``iaca``."""
     async with profile.session() as session:
-        records = await TrustAnchorRecord.query(session, tag_filter={"purpose": "iaca"})
-        for record in records:
-            # When doctype is unspecified, include all anchors (no filtering).
-            # When doctype is specified, include only exact matches and wildcards
-            # (records stored without a doctype that apply to all credential types).
-            if doctype is None or record.doctype is None or record.doctype == doctype:
-                if record.certificate_pem:
-                    anchors.append(record.certificate_pem)
-
-    return anchors
+        records = await X509TrustAnchorRecord.query(session, {"purpose": "iaca"})
+    return [record.certificate_pem for record in records]
 
 
 class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
@@ -201,10 +165,8 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
 
         return doctype
 
-    def _extract_device_key(
-        self, pop: PopResult, ex_record: OID4VCIExchangeRecord
-    ) -> Optional[str]:
-        """Extract device authentication key from proof of possession or exchange record.
+    def _extract_device_key(self, pop: PopResult) -> Optional[str]:
+        """Extract the holder's device key from the proof of possession.
 
         Extracts and validates the device key for holder binding according to
         ISO 18013-5 § 9.1.3.4 device authentication requirements and
@@ -212,7 +174,6 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
 
         Args:
             pop: Proof of possession result containing holder key information
-            ex_record: Exchange record with credential issuance context
 
         Returns:
             Serialized device key string (JWK JSON or key identifier),
@@ -221,10 +182,7 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
         Raises:
             CredProcessorError: If device key format is invalid or unsupported
         """
-        # Priority order: holder JWK > holder key ID > verification method from record
-        device_candidate = (
-            pop.holder_jwk or pop.holder_kid or ex_record.verification_method
-        )
+        device_candidate = pop.holder_jwk or pop.holder_kid
 
         if isinstance(device_candidate, dict):
             # The device key embedded in the mDoc MSO must contain ONLY public
@@ -281,66 +239,14 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
             headers["deviceKey"] = device_key_str
         return headers
 
-    async def _resolve_signing_key(
-        self,
-        supported: SupportedCredential,
-        profile: Optional[Profile] = None,
-    ) -> Dict[str, Any]:
-        """Resolve the signing key for credential issuance.
-
-        Resolution order:
-        1. ``signing_key_id`` in ``vc_additional_data`` — fetch a specific
-           ``MdocSigningKeyRecord`` by ID.
-        2. ``MdocSigningKeyRecord`` query by doctype — first matching record.
-
-        Returns:
-            Dict with ``private_key_pem`` and ``certificate_pem``.
-        """
-        additional = supported.vc_additional_data or {}
-        doctype = (supported.format_data or {}).get("doctype")
-
-        # 1. Explicit signing key record ID
-        signing_key_id = additional.get("signing_key_id")
-        if signing_key_id and profile:
-            try:
-                async with profile.session() as session:
-                    key_record = await MdocSigningKeyRecord.retrieve_by_id(
-                        session, signing_key_id
-                    )
-                if key_record.private_key_pem and key_record.certificate_pem:
-                    return {
-                        "private_key_pem": key_record.private_key_pem,
-                        "certificate_pem": key_record.certificate_pem,
-                    }
-            except Exception as exc:
-                LOGGER.warning(
-                    "Could not load MdocSigningKeyRecord %s: %s", signing_key_id, exc
-                )
-
-        # 2. MdocSigningKeyRecord query by doctype (or any key if no doctype)
-        if profile:
-            try:
-                async with profile.session() as session:
-                    tag_filter = {"doctype": doctype} if doctype else None
-                    key_records = await MdocSigningKeyRecord.query(
-                        session, tag_filter=tag_filter
-                    )
-                    if not key_records and doctype:
-                        # fall back to wildcard keys (no doctype set)
-                        key_records = await MdocSigningKeyRecord.query(session)
-                    for key_record in key_records:
-                        if key_record.private_key_pem and key_record.certificate_pem:
-                            return {
-                                "private_key_pem": key_record.private_key_pem,
-                                "certificate_pem": key_record.certificate_pem,
-                            }
-            except Exception as exc:
-                LOGGER.debug("MdocSigningKeyRecord query failed: %s", exc)
-
-        raise CredProcessorError(
-            "No mDoc signing key configured. "
-            "Create a MdocSigningKeyRecord via POST /mso-mdoc/signing-keys."
-        )
+    async def _signing_verkey(self, wallet: BaseWallet, multikey: Optional[str]) -> str:
+        """Verkey of the exchange's P-256 signing key."""
+        if not multikey:
+            raise CredProcessorError("mso_mdoc requires signing_multikey on the exchange")
+        verkey = multikey_to_verkey(multikey)
+        if (await wallet.get_signing_key(verkey)).key_type != P256:
+            raise CredProcessorError("mso_mdoc requires a P-256 signing key")
+        return verkey
 
     async def _assign_status_entry(
         self,
@@ -440,7 +346,7 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
             doctype = self._validate_and_get_doctype(body, supported)
 
             # Extract device key for holder binding
-            device_key_str = self._extract_device_key(pop, ex_record)
+            device_key_str = self._extract_device_key(pop)
 
             # Build mso_mdoc headers
             headers = self._build_headers(doctype, device_key_str)
@@ -453,20 +359,9 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
             if status_claim:
                 payload["status"] = status_claim
 
-            # Resolve signing key — check MdocSigningKeyRecord first, then
-            # fall back to vc_additional_data and env vars
-            key_data = await self._resolve_signing_key(supported, context.profile)
-            private_key_pem = key_data["private_key_pem"]
-            certificate_pem = key_data["certificate_pem"]
-
-            # Validity-period guard: reject expired or not-yet-valid certificates
-            # before passing them to the Rust signing library.
-            check_certificate_not_expired(certificate_pem)
-
             if not device_key_str and not pop.holder_jwk:
                 raise CredProcessorError(
-                    "No device key available: provide holder_jwk, "
-                    "holder_kid, or verification_method"
+                    "No device key available: provide holder_jwk or holder_kid"
                 )
 
             # Clean up JWK for isomdl (remove extra fields like kid, alg, use)
@@ -495,7 +390,7 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
                 (list(payload.keys()) if isinstance(payload, dict) else type(payload)),
             )
             # Use cleaned JWK if available, otherwise fall back to
-            # the device key extracted from holder_kid / verification_method.
+            # the device key extracted from holder_kid.
             # isomdl_mdoc_sign expects a dict-like JWK.
             signing_holder_key = holder_jwk_clean
             if signing_holder_key is None and device_key_str:
@@ -516,9 +411,27 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
                     "Unable to resolve a holder JWK for device key binding."
                 )
 
-            mso_mdoc = isomdl_mdoc_sign(
-                signing_holder_key, headers, payload, certificate_pem, private_key_pem
-            )
+            multikey = ex_record.signing_multikey
+            async with context.profile.session() as session:
+                wallet = session.inject(BaseWallet)
+                verkey = await self._signing_verkey(wallet, multikey)
+
+                async def certificate_chain_for(valid_until: datetime) -> str:
+                    try:
+                        record = await select_certificate(
+                            session, multikey, "mdoc_ds", valid_until
+                        )
+                    except X509Error as err:
+                        raise CredProcessorError(str(err)) from err
+                    return pem_chain(embedded_x5c(record))
+
+                mso_mdoc = await isomdl_mdoc_sign(
+                    signing_holder_key,
+                    headers,
+                    payload,
+                    make_wallet_signer(wallet, verkey),
+                    certificate_chain_for,
+                )
 
             # Normalize mDoc result handling for robust string/bytes processing
             mso_mdoc = normalize_mdoc_result(mso_mdoc)

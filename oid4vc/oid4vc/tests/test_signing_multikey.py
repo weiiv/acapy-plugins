@@ -115,6 +115,14 @@ async def test_create_exchange_signing_multikey_jwt_vc_json_needs_issuer_id(
 
 
 @pytest.mark.asyncio
+async def test_create_exchange_mso_mdoc_needs_signing_multikey(create_request):
+    request = create_request({"did": "did:jwk:eyJjcnYiOiJQLTI1NiJ9"}, fmt="mso_mdoc")
+
+    with pytest.raises(web.HTTPBadRequest, match="require signing_multikey"):
+        await create_exchange(request)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("signing_multikey", "reason"),
     [
