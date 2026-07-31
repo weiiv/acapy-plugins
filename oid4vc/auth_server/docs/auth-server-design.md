@@ -153,9 +153,10 @@ sequenceDiagram
   CredentialIssuer-->>Wallet: credential_offer_uri
 
   Wallet->>AuthorizationServer: POST /token
-  Note over Wallet, AuthorizationServer: Includes:<br/>- pre-authorized_code<br/>- Header: OAuth-Client-Attestation<br/>- Header: OAuth-Client-Attestation-PoP
+  Note over Wallet, AuthorizationServer: Includes:<br/>- pre-authorized_code<br/>- Header: OAuth-Client-Attestation (if enabled)<br/>- Header: OAuth-Client-Attestation-PoP (if enabled)
   alt Valid `/token` request
-    AuthorizationServer->>AuthorizationServer: Validate Attestation (kid lookup in allow list)
+    AuthorizationServer->>AuthorizationServer: Validate Attestation if enabled (kid lookup in allow list)
+    AuthorizationServer->>AuthorizationServer: Validate DPoP proof if enabled
     AuthorizationServer->>DB: Store access_token (with amr, attestation metadata) + refresh_token
     AuthorizationServer-->>Wallet: access_token, refresh_token
   else Invalid
@@ -200,7 +201,7 @@ sequenceDiagram
 
 | Component            | Validates                                                                                                                                  |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Authorization Server | Pre-auth code; **Attestation JWT** (verified via `kid` + allow list); **Attestation PoP JWT** (wallet instance proof); refresh token rotation (validated for `used=false`) |
+| Authorization Server | Pre-auth code; **Attestation JWT** (when enabled: verified via `kid` + allow list); **Attestation PoP JWT** (wallet instance proof); **DPoP proof** (when enabled); refresh token rotation (validated for `used=false`) |
 | Credential Issuer    | Introspection (active token, realm match); Nonce proof                                                         |
 
 ---
@@ -216,7 +217,18 @@ sequenceDiagram
 
 ## 🧾 Attestation PoP
 
-**Purpose:** Provide an additional verifiable PoP signal at `/token`, ensuring the client is a legitimate wallet attested by a trusted Wallet Provider.
+**Purpose:** Provide an additional verifiable PoP signal at `/token`, ensuring the client is a legitimate wallet attested by a trusted Wallet Provider. Implements [draft-ietf-oauth-attestation-based-client-auth-07](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-attestation-based-client-auth-07) (the version referenced by OID4VCI 1.0).
+
+### Feature State
+
+Attestation is controlled by two environment variables that together define one of three valid states:
+
+| `ATTESTATION_ENABLED` | `ATTESTATION_REQUIRED` | Behaviour |
+|---|---|---|
+| `false` | `false` | Attestation fully disabled. `attest_jwt_client_auth` is omitted from `token_endpoint_auth_methods_supported`. Supplied attestation headers are ignored. |
+| `true` | `false` | Attestation supported but optional. Discovery advertises `attest_jwt_client_auth` plus mandatory algorithm metadata. A supplied attestation is validated; absence is accepted. |
+| `true` | `true` | Attestation required. `"none"` is removed from `token_endpoint_auth_methods_supported`. A missing attestation causes `invalid_client`. |
+| `false` | `true` | **Invalid** — rejected at startup. |
 
 ### Flow
 
@@ -329,11 +341,21 @@ DPoP ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html)) binds access toke
 
 ### ✅ Support
 
-- **Required at `/token`** (Authorization Server) and **`/credential`** (Credential Issuer).
-- Access tokens are issued with `"token_type": "DPoP"` (not `"Bearer"`).
+DPoP is controlled by two environment variables that together define one of three valid states:
+
+| `DPOP_ENABLED` | `DPOP_REQUIRED` | Behaviour |
+|---|---|---|
+| `false` | `false` | DPoP fully disabled. `dpop_signing_alg_values_supported` is omitted from discovery. Supplied `DPoP` headers are ignored. `DPoP-Nonce` is never emitted. Tokens are `Bearer`. |
+| `true` | `false` | DPoP supported but optional. Discovery advertises `dpop_signing_alg_values_supported`. A supplied proof is validated; absence is accepted. |
+| `true` | `true` | DPoP required. A missing proof causes `invalid_dpop_proof`. |
+| `false` | `true` | **Invalid** — rejected at startup. |
+
+> **OID4VCI §13.10 bearer-token constraint:** When DPoP is disabled, bearer access tokens longer than 5 minutes MUST NOT be issued. Set `TENANT_ACCESS_TOKEN_TTL` ≤ 300.
+
+- When enabled, access tokens are issued with `"token_type": "DPoP"`.
 - Access tokens include a `cnf.jkt` claim (JWK Thumbprint per [RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html)) binding the token to the client's DPoP key.
 - Replay protection via `jti` claim on DPoP proof JWTs, tracked in `JTI_SEEN`.
-- Server-provided nonce support via `DPoP-Nonce` response header and `use_dpop_nonce` error.
+- Server-provided nonce support via `DPoP-Nonce` response header and `use_dpop_nonce` error. Nonce challenges are only emitted while DPoP is enabled — a configured `DPOP_NONCE_SECRET` has no effect when `DPOP_ENABLED=false`.
 
 ### 🔑 DPoP Key vs. Attestation Key
 

@@ -5,6 +5,8 @@ for the FastAPI token flow. Returns the JWK thumbprint (jkt) on success
 or raises an OAuth2 error.
 """
 
+from typing import Any
+
 from authlib.jose import JoseError, JsonWebKey, jwt
 from authlib.oauth2.rfc6749 import OAuth2Request
 from authlib.oauth2.rfc7636 import create_s256_code_challenge
@@ -17,6 +19,22 @@ from tenant.config import settings
 from tenant.security.dpop import HmacDPoPNonceGenerator
 
 logger = get_logger(__name__)
+
+_ALLOWED_KTY = frozenset({"EC", "OKP", "RSA"})
+
+
+def _validate_inline_jwk(jwk_obj: Any, *, for_resource: bool, algs: list) -> None:
+    """Reject malformed JWKs before they reach the native library."""
+    if not isinstance(jwk_obj, dict):
+        raise InvalidDPopProofError(
+            "DPoP 'jwk' must be a JSON object", algs=algs, for_resource=for_resource
+        )
+    if jwk_obj.get("kty") not in _ALLOWED_KTY:
+        raise InvalidDPopProofError(
+            f"DPoP unsupported kty: {jwk_obj.get('kty')!r}",
+            algs=algs,
+            for_resource=for_resource,
+        )
 
 
 class _FixedDPoPProofValidator(DPoPProofValidator):
@@ -108,6 +126,9 @@ class _FixedDPoPProofValidator(DPoPProofValidator):
                 for_resource=for_resource,
             )
 
+        _validate_inline_jwk(
+            unverified_header["jwk"], for_resource=for_resource, algs=self.algs
+        )
         key = JsonWebKey.import_key(unverified_header["jwk"])
         self.validate_header(unverified_header, for_resource=for_resource)
 
@@ -219,7 +240,7 @@ def validate_dpop_proof(
 
 def get_dpop_nonce() -> str | None:
     """Return a fresh DPoP nonce for response headers, or None if nonce not configured."""
-    if not settings.DPOP_NONCE_SECRET:
+    if not settings.DPOP_ENABLED or not settings.DPOP_NONCE_SECRET:
         return None
     validator = _get_validator()
     if validator.nonce_generator:

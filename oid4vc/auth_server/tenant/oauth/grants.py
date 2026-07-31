@@ -51,6 +51,8 @@ class _BaseTenantGrant(grants.BaseGrant):
 
     async def _validate_attestation(self, *, required: bool) -> dict[str, Any] | None:
         """Extract attestation headers and validate against allow list."""
+        if not settings.ATTESTATION_ENABLED:
+            return None
         headers = getattr(self.request, "headers", {}) or {}
         extra = get_context(self.request)
         uid = getattr(extra, "uid", None)
@@ -70,6 +72,8 @@ class _BaseTenantGrant(grants.BaseGrant):
         Returns the JWK thumbprint (jkt) on success, None if DPoP not used.
         Raises UseDPoPNonceError or InvalidDPopProofError on failure.
         """
+        if not settings.DPOP_ENABLED:
+            return None
         headers = getattr(self.request, "headers", {}) or {}
         has_dpop = "dpop" in headers or "DPoP" in headers
         if not has_dpop and not settings.DPOP_REQUIRED:

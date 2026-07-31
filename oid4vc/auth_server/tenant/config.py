@@ -1,5 +1,6 @@
 """Tenant settings."""
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,10 +26,12 @@ class Settings(BaseSettings):
     NONCE_BYTES: int = 16
 
     # Attestation
+    ATTESTATION_ENABLED: bool = True
     ATTESTATION_REQUIRED: bool = False
     ATTESTATION_CLOCK_SKEW_SECONDS: int = 60
 
     # DPoP
+    DPOP_ENABLED: bool = True
     DPOP_REQUIRED: bool = False
     DPOP_NONCE_SECRET: str = ""
     DPOP_NONCE_INTERVAL: int = 60
@@ -60,6 +63,15 @@ class Settings(BaseSettings):
 
     # Proxy
     PROXY_TRUSTED_HOSTS: list[str] | str = "127.0.0.1"
+
+    @model_validator(mode="after")
+    def validate_security_features(self):
+        """Reject required security features that are disabled."""
+        if self.ATTESTATION_REQUIRED and not self.ATTESTATION_ENABLED:
+            raise ValueError("ATTESTATION_REQUIRED requires ATTESTATION_ENABLED")
+        if self.DPOP_REQUIRED and not self.DPOP_ENABLED:
+            raise ValueError("DPOP_REQUIRED requires DPOP_ENABLED")
+        return self
 
 
 settings = Settings()

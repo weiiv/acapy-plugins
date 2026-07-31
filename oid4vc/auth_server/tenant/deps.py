@@ -1,5 +1,6 @@
 """Tenant deps: DB session + JWKS resolution, cached per uid."""
 
+import re
 import time
 from collections import OrderedDict
 from typing import AsyncIterator
@@ -21,6 +22,7 @@ from tenant.config import settings
 _CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _MAX_CACHE = 256
 _TTL = settings.CONTEXT_CACHE_TTL
+_UID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 @with_retries(
@@ -50,6 +52,8 @@ async def _fetch_tenant_ctx(uid: str | None = None) -> dict:
     """Fetch tenant DB + JWKS from admin, update local cache."""
     if not uid:
         raise HTTPException(status_code=400, detail="Missing tenant uid.")
+    if not _UID_RE.match(uid):
+        raise HTTPException(status_code=400, detail="invalid_tenant")
 
     base = f"{settings.INTERNAL_BASE_URL}/tenants/{uid}"
     headers = internal_api_headers(settings.INTERNAL_AUTH_TOKEN)
