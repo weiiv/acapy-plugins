@@ -1,4 +1,4 @@
-"""Add tx_code brute-force protection, JTI replay table, drop unused dpop_jti."""
+"""Add tx_code brute-force protection and JTI replay table."""
 
 from alembic import op
 
@@ -20,27 +20,11 @@ def upgrade() -> None:
         );
         CREATE INDEX IF NOT EXISTS ix_jti_seen_expires_at
             ON jti_seen (expires_at);
-
-        DROP TABLE IF EXISTS dpop_jti;
     """)
 
 
 def downgrade() -> None:
     op.execute("""
-        CREATE TABLE IF NOT EXISTS dpop_jti (
-            id SERIAL PRIMARY KEY,
-            subject_id INTEGER NOT NULL REFERENCES subject(id)
-                ON UPDATE CASCADE ON DELETE CASCADE,
-            jti TEXT NOT NULL UNIQUE,
-            htm TEXT,
-            htu TEXT,
-            cnf_jkt TEXT,
-            issued_at TIMESTAMPTZ NOT NULL,
-            expires_at TIMESTAMPTZ NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_dpop_jti_expires_at
-            ON dpop_jti (expires_at);
-
         DROP INDEX IF EXISTS ix_jti_seen_expires_at;
         DROP TABLE IF EXISTS jti_seen;
 

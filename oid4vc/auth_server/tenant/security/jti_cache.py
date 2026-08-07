@@ -1,6 +1,6 @@
 """JTI replay prevention (PostgreSQL-backed).
 
-Covers: private_key_jwt (RFC 7523), attestation PoP (draft-07), DPoP (RFC 9449).
+Covers token-related JWT flows, including private_key_jwt and attestation PoP.
 """
 
 from __future__ import annotations
