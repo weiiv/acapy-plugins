@@ -21,6 +21,7 @@ from acapy_agent.wallet.util import bytes_to_b64, unpad
 from bitarray import bitarray
 
 from .config import Config
+from .cwt import cwt_sign
 from .error import StatusListError
 from .jwt import jwt_sign
 from .models import StatusListCred, StatusListDef, StatusListReg, StatusListShard
@@ -405,7 +406,7 @@ async def get_status_list(
             # IETF Token Status List uses little-endian bit numbering within each byte
             status_bits = bitarray(status_bits, endian="little")
             bit_bytes = status_bits.tobytes()
-            bit_bytes = zlib.compress(bit_bytes)
+            bit_bytes = zlib.compress(bit_bytes, level=zlib.Z_BEST_COMPRESSION)
         elif definition.list_type == "w3c":
             # W3C Bitstring Status List uses big-endian bit numbering within each byte
             status_bits = bitarray(status_bits, endian="big")
@@ -489,8 +490,14 @@ async def get_status_list_token(
     context: AdminRequestContext,
     list_number: str,
     definition: Optional[StatusListDef] = None,
+    *,
+    accept: Optional[str] = None,
 ):
-    """Publish status list."""
+    """Publish status list.
+
+    Returns a CWT (bytes, `application/statuslist+cwt`) when the IETF
+    variant is requested via `accept`, otherwise a JWT string.
+    """
 
     if definition is None:
         async with context.profile.session() as session:
@@ -500,6 +507,15 @@ async def get_status_list_token(
             definition = await StatusListDef.retrieve_by_id(session, definition_id)
 
     status_list = await get_status_list(context, definition, list_number)
+
+    if definition.list_type == "ietf" and accept and "statuslist+cwt" in accept:
+        return await cwt_sign(
+            profile=context.profile,
+            payload=status_list,
+            did=definition.issuer_did,
+            verification_method=definition.verification_method,
+        )
+
     headers = {"typ": "statuslist+jwt"} if definition.list_type == "ietf" else {}
 
     return await jwt_sign(
