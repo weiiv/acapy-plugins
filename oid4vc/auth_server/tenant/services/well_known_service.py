@@ -68,6 +68,10 @@ async def build_oauth_auth_server(uid: str, request: Request) -> dict:
             SUPPORTED_SIGNING_ALGS
         )
 
+    # DPoP support (RFC 9449 §5)
+    if settings.DPOP_ENABLED:
+        doc["dpop_signing_alg_values_supported"] = ["ES256", "ES384"]
+
     if is_internal_request(request):
         doc["introspection_endpoint"] = f"{base_url}/introspect"
         doc["introspection_endpoint_auth_methods_supported"] = [

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from authlib.oauth2.rfc6749 import AuthorizationServer, OAuth2Request
@@ -105,16 +105,21 @@ async def test_disabled_security_features_skip_validation(monkeypatch):
     server = DummyServer()
     request = make_request({"pre-authorized_code": "abc"})
     attestation_validator = AsyncMock()
+    dpop_validator = Mock()
     monkeypatch.setattr("tenant.oauth.grants.settings.ATTESTATION_ENABLED", False)
+    monkeypatch.setattr("tenant.oauth.grants.settings.DPOP_ENABLED", False)
     monkeypatch.setattr(
         "tenant.oauth.grants.validate_client_attestation", attestation_validator
     )
+    monkeypatch.setattr("tenant.oauth.grants.validate_dpop_proof", dpop_validator)
 
     grant = PreAuthorizedCodeGrant(request, server)
     await grant.validate_token_request()
 
     attestation_validator.assert_not_awaited()
+    dpop_validator.assert_not_called()
     assert grant._attestation_meta is None
+    assert grant._dpop_jkt is None
 
 
 @pytest.mark.asyncio
@@ -179,3 +184,43 @@ async def test_provider_lookup_outage_is_not_a_client_error(monkeypatch):
         await grant.validate_token_request()
 
     assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enabled", "required", "has_proof", "expected"),
+    [
+        (False, False, True, "skip"),
+        (True, False, False, "skip"),
+        (True, False, True, "validate"),
+        (True, True, False, "reject"),
+        (True, True, True, "validate"),
+    ],
+)
+async def test_dpop_policy_matrix(monkeypatch, enabled, required, has_proof, expected):
+    server = DummyServer()
+    headers = {"DPoP": "proof"} if has_proof else None
+    request = make_request({"pre_authorized_code": "abc"}, headers=headers)
+    validator = Mock(return_value="dpop-jkt")
+    monkeypatch.setattr(
+        "tenant.oauth.grants.get_context",
+        lambda _req: SimpleNamespace(uid="tenant-1", db=object()),
+    )
+    monkeypatch.setattr("tenant.oauth.grants.settings.ATTESTATION_ENABLED", False)
+    monkeypatch.setattr("tenant.oauth.grants.settings.DPOP_ENABLED", enabled)
+    monkeypatch.setattr("tenant.oauth.grants.settings.DPOP_REQUIRED", required)
+    monkeypatch.setattr("tenant.oauth.grants.validate_dpop_proof", validator)
+
+    grant = PreAuthorizedCodeGrant(request, server)
+    if expected == "reject":
+        with pytest.raises(Exception, match="DPoP proof required"):
+            await grant.validate_token_request()
+        validator.assert_not_called()
+    else:
+        await grant.validate_token_request()
+        if expected == "validate":
+            validator.assert_called_once_with(request)
+            assert grant._dpop_jkt == "dpop-jkt"
+        else:
+            validator.assert_not_called()
+            assert grant._dpop_jkt is None

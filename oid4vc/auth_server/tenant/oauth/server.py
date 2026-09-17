@@ -72,6 +72,7 @@ def get_authorization_server() -> AuthorizationServer:
                 code = ctx.get("code") or ""
                 tx_code = ctx.get("tx_code")
                 attestation = ctx.get("attestation")
+                dpop_jkt = ctx.get("dpop_jkt")
                 (
                     access_token,
                     refresh_token,
@@ -83,6 +84,7 @@ def get_authorization_server() -> AuthorizationServer:
                     realm=realm,
                     tx_code=tx_code,
                     attestation=attestation,
+                    dpop_jkt=dpop_jkt,
                 )
                 _fill_response(access_token, refresh_token, response_meta)
                 return
@@ -90,6 +92,7 @@ def get_authorization_server() -> AuthorizationServer:
             if flow == OAuth2Flow.REFRESH_TOKEN:
                 refresh_token = ctx.get("refresh_token") or ""
                 attestation = ctx.get("attestation")
+                dpop_jkt = ctx.get("dpop_jkt")
                 (
                     new_access,
                     new_refresh_token,
@@ -100,6 +103,7 @@ def get_authorization_server() -> AuthorizationServer:
                     refresh_token_value=refresh_token,
                     realm=realm,
                     attestation=attestation,
+                    dpop_jkt=dpop_jkt,
                 )
                 _fill_response(new_access, new_refresh_token, response_meta)
                 return

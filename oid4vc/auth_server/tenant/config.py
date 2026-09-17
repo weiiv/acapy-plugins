@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     ATTESTATION_REQUIRED: bool = False
     ATTESTATION_CLOCK_SKEW_SECONDS: int = 60
 
+    # DPoP
+    DPOP_ENABLED: bool = True
+    DPOP_REQUIRED: bool = False
+    DPOP_NONCE_SECRET: str = ""
+    DPOP_NONCE_INTERVAL: int = 60
+
     # Database
     DB_DRIVER_ASYNC: str = "postgresql+asyncpg"
     DB_DRIVER_SYNC: str = "postgresql+psycopg"
@@ -67,6 +73,8 @@ class Settings(BaseSettings):
         """Reject required security features that are disabled."""
         if self.ATTESTATION_REQUIRED and not self.ATTESTATION_ENABLED:
             raise ValueError("ATTESTATION_REQUIRED requires ATTESTATION_ENABLED")
+        if self.DPOP_REQUIRED and not self.DPOP_ENABLED:
+            raise ValueError("DPOP_REQUIRED requires DPOP_ENABLED")
         return self
 
 

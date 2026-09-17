@@ -13,6 +13,7 @@ async def test_security_features_are_not_advertised_when_disabled(monkeypatch):
     monkeypatch.setattr(
         "tenant.services.well_known_service.settings.ATTESTATION_ENABLED", False
     )
+    monkeypatch.setattr("tenant.services.well_known_service.settings.DPOP_ENABLED", False)
 
     doc = await build_oauth_auth_server(
         "tenant-1", SimpleNamespace(client=SimpleNamespace(host="203.0.113.1"))
@@ -21,6 +22,7 @@ async def test_security_features_are_not_advertised_when_disabled(monkeypatch):
     assert doc["token_endpoint_auth_methods_supported"] == ["none"]
     assert "client_attestation_signing_alg_values_supported" not in doc
     assert "client_attestation_pop_signing_alg_values_supported" not in doc
+    assert "dpop_signing_alg_values_supported" not in doc
 
 
 @pytest.mark.asyncio
@@ -32,6 +34,7 @@ async def test_security_features_are_advertised_when_enabled(monkeypatch):
     monkeypatch.setattr(
         "tenant.services.well_known_service.settings.ATTESTATION_REQUIRED", False
     )
+    monkeypatch.setattr("tenant.services.well_known_service.settings.DPOP_ENABLED", True)
 
     doc = await build_oauth_auth_server(
         "tenant-1", SimpleNamespace(client=SimpleNamespace(host="203.0.113.1"))
@@ -47,6 +50,7 @@ async def test_security_features_are_advertised_when_enabled(monkeypatch):
     assert doc["client_attestation_pop_signing_alg_values_supported"] == list(
         SUPPORTED_SIGNING_ALGS
     )
+    assert doc["dpop_signing_alg_values_supported"] == ["ES256", "ES384"]
 
 
 @pytest.mark.asyncio
