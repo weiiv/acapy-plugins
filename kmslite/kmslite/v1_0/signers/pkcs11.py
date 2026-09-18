@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import logging
 from contextlib import asynccontextmanager, contextmanager
-from typing import Any, Mapping, Optional
+from typing import Any, List, Mapping, Optional, Union
 
 import pkcs11
 from pkcs11 import Attribute, KeyType as P11KeyType, Mechanism, ObjectClass
@@ -142,9 +142,7 @@ class PKCS11Signer:
             # Real HSMs enforce CKA_LABEL uniqueness; simulators (BouncyHsm)
             # don't, so we pre-check.
             with _wrap_pkcs11_errors("generate_keypair", key_ref):
-                await asyncio.to_thread(
-                    self._assert_key_ref_free_sync, session, key_ref
-                )
+                await asyncio.to_thread(self._assert_key_ref_free_sync, session, key_ref)
                 der = await asyncio.to_thread(
                     self._create_keypair_sync, session, key_ref, curve_name
                 )
@@ -162,9 +160,12 @@ class PKCS11Signer:
         return _der_point_to_verkey(der)
 
     async def sign(
-        self, key_ref: str, message: bytes, key_type: KeyType
+        self, key_ref: str, message: Union[List[bytes], bytes], key_type: KeyType
     ) -> bytes:
         self._check_key_type(key_type)
+        # ACA-Py sends a list only for BBS+, which needs a BLS key, not P-256.
+        if not isinstance(message, bytes):
+            raise WalletError("PKCS11Signer: multi-message signing is not supported")
         digest = hashlib.sha256(message).digest()
         async with self._session() as session:
             with _wrap_pkcs11_errors("sign", key_ref):
@@ -185,9 +186,7 @@ class PKCS11Signer:
             f"PKCS11Signer: key_ref {key_ref!r} already exists on the token"
         )
 
-    def _create_keypair_sync(
-        self, session, key_ref: str, curve_name: str
-    ) -> bytes:
+    def _create_keypair_sync(self, session, key_ref: str, curve_name: str) -> bytes:
         ec_params = encode_named_curve_parameters(curve_name)
         public_key, _ = session.generate_keypair(
             P11KeyType.EC,
