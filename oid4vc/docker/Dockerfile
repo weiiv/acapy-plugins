@@ -1,4 +1,5 @@
-FROM python:3.13-slim-bookworm AS base
+# isomdl-uniffi below only ships an x86_64 wheel; podman-compose doesn't forward --platform, so pin it here
+FROM --platform=linux/amd64 python:3.13-slim-bookworm AS base
 WORKDIR /usr/src/app
 
 # Install and configure poetry
@@ -26,7 +27,7 @@ RUN poetry install --without dev --all-extras
 
 USER $user
 
-FROM python:3.13-bookworm
+FROM --platform=linux/amd64 python:3.13-bookworm
 
 ARG TARGETARCH
 
