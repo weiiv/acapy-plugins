@@ -27,6 +27,28 @@ def test_serde(record: OID4VCIExchangeRecord):
     assert record == deserialized
 
 
+def test_record_value_omits_unset_signing_multikey(record: OID4VCIExchangeRecord):
+    assert "signing_multikey" not in record.record_value
+
+
+@pytest.mark.asyncio
+async def test_save_with_signing_multikey(profile: Profile):
+    record = OID4VCIExchangeRecord(
+        state=OID4VCIExchangeRecord.STATE_CREATED,
+        supported_cred_id="456",
+        credential_subject={"name": "alice"},
+        signing_multikey="zDnaeZv4cPZ9zVfMvxWdjnXc1hFXY9LYM894FyZpVsGHnx3oG",
+    )
+    async with profile.session() as session:
+        await record.save(session)
+        loaded = await OID4VCIExchangeRecord.retrieve_by_id(session, record.exchange_id)
+
+    assert loaded == record
+    assert loaded.signing_multikey == record.signing_multikey
+    assert loaded.verification_method is None
+    assert loaded.issuer_id is None
+
+
 @pytest.mark.asyncio
 async def test_save(profile: Profile, record: OID4VCIExchangeRecord):
     async with profile.session() as session:
