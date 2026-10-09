@@ -55,8 +55,9 @@ class OID4VCIExchangeRecord(BaseExchangeRecord):
         state: str,
         supported_cred_id: str,
         credential_subject: Dict[str, Any],
-        verification_method: str,
-        issuer_id: str,
+        verification_method: Optional[str] = None,
+        issuer_id: Optional[str] = None,
+        signing_multikey: Optional[str] = None,
         refresh_id: Optional[str] = None,
         notification_id: Optional[str] = None,
         notification_event: Optional[dict] = None,
@@ -73,6 +74,7 @@ class OID4VCIExchangeRecord(BaseExchangeRecord):
         self.credential_subject = credential_subject  # (received from submit)
         self.verification_method = verification_method
         self.issuer_id = issuer_id
+        self.signing_multikey = signing_multikey
         self.refresh_id = refresh_id or str(uuid4())
         self.notification_id = notification_id
         self.notification_event = notification_event
@@ -90,7 +92,7 @@ class OID4VCIExchangeRecord(BaseExchangeRecord):
     @property
     def record_value(self) -> dict:
         """Return dict representation of the exchange record for storage."""
-        return {
+        value = {
             prop: getattr(self, prop)
             for prop in (
                 "supported_cred_id",
@@ -107,6 +109,10 @@ class OID4VCIExchangeRecord(BaseExchangeRecord):
                 "expires_at",
             )
         }
+        # Stored only when set: older plugin versions reject unknown keys on load.
+        if self.signing_multikey:
+            value["signing_multikey"] = self.signing_multikey
+        return value
 
     @classmethod
     async def retrieve_by_refresh_id(
@@ -171,7 +177,7 @@ class OID4VCIExchangeRecordSchema(BaseRecordSchema):
         },
     )
     verification_method = fields.Str(
-        required=True,
+        required=False,
         validate=Uri(),
         metadata={
             "description": "Information used to identify the issuer keys",
@@ -182,11 +188,18 @@ class OID4VCIExchangeRecordSchema(BaseRecordSchema):
         },
     )
     issuer_id = fields.Str(
-        required=True,
+        required=False,
         validate=Uri(),
         metadata={
             "description": "Information used to identify the issuer",
             "example": ("did:key:z6Mkgg342Ycpuk263R9d8Aq6MUaxPn1DDeHyGo38EefXmgDL"),
+        },
+    )
+    signing_multikey = fields.Str(
+        required=False,
+        metadata={
+            "description": "Multikey of the wallet key that signs the credential",
+            "example": "zDnaeZv4cPZ9zVfMvxWdjnXc1hFXY9LYM894FyZpVsGHnx3oG",
         },
     )
     refresh_id = fields.Str(

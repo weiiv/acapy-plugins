@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Union
 from acapy_agent.admin.request_context import AdminRequestContext
 from acapy_agent.core.profile import Profile
 from acapy_agent.wallet.jwt import JWTVerifyResult
+from acapy_agent.wallet.keys.manager import multikey_to_verkey
 from acapy_agent.wallet.util import bytes_to_b64
 from jsonpointer import EndOfList, JsonPointer, JsonPointerException
 from pydid import DIDUrl
@@ -146,14 +147,11 @@ class SdJwtCredIssueProcessor(Issuer, CredVerifier, PresVerifier):
         # as the key-identification header (RFC 7517 §4.7); x5c and kid are
         # mutually exclusive.
         x5c_chain = (supported.vc_additional_data or {}).get("x5c_cert_chain")
-        headers = {
-            "typ": supported.format,  # "vc+sd-jwt" or "dc+sd-jwt" per credential config
-            **(
-                {"x5c": x5c_chain}
-                if x5c_chain
-                else {"kid": ex_record.verification_method}
-            ),
-        }
+        headers = {"typ": supported.format}  # "vc+sd-jwt" or "dc+sd-jwt"
+        if x5c_chain:
+            headers["x5c"] = x5c_chain
+        elif ex_record.verification_method:
+            headers["kid"] = ex_record.verification_method
 
         # exp can be provided in credential_subject or vc_additional_data;
         # default to 1 year from issuance if not set
@@ -165,10 +163,11 @@ class SdJwtCredIssueProcessor(Issuer, CredVerifier, PresVerifier):
         claims = {
             **claims,
             "vct": vct,
-            "iss": ex_record.issuer_id,
             "iat": current_time,
             "exp": current_time + int(exp_seconds),
         }
+        if ex_record.issuer_id:
+            claims["iss"] = ex_record.issuer_id
 
         status_handler = context.inject_or(StatusHandler)
         if status_handler and (
@@ -182,8 +181,15 @@ class SdJwtCredIssueProcessor(Issuer, CredVerifier, PresVerifier):
         profile = context.profile
         did = ex_record.issuer_id
         ver_method = ex_record.verification_method
+        verkey = (
+            multikey_to_verkey(ex_record.signing_multikey)
+            if ex_record.signing_multikey
+            else None
+        )
         try:
-            cred = await sd_jwt_sign(sd_list, claims, headers, profile, did, ver_method)
+            cred = await sd_jwt_sign(
+                sd_list, claims, headers, profile, did, ver_method, verkey=verkey
+            )
             LOGGER.info("SD JWT VC CREDENTIAL: %s", cred)
             return cred
         except SDJWTError as error:
@@ -321,6 +327,7 @@ class SDJWTIssuerACAPy(SDJWTIssuer):
         verification_method: Optional[str] = None,
         add_decoy_claims: bool = False,
         serialization_format: str = "compact",
+        verkey: Optional[str] = None,
     ):
         """Initialize an SDJWTIssuerACAPy instance."""
         self._user_claims = user_claims
@@ -331,6 +338,7 @@ class SDJWTIssuerACAPy(SDJWTIssuer):
         self.headers = headers
         self.did = did
         self.verification_method = verification_method
+        self.verkey = verkey
 
         self._add_decoy_claims = add_decoy_claims
         self._serialization_format = serialization_format
@@ -343,6 +351,7 @@ class SDJWTIssuerACAPy(SDJWTIssuer):
             self.sd_jwt_payload,
             self.did,
             self.verification_method,
+            verkey=self.verkey,
         )
 
     async def issue(self) -> str:
@@ -364,6 +373,8 @@ async def sd_jwt_sign(
     profile: Profile,
     did: Optional[str] = None,
     verification_method: Optional[str] = None,
+    *,
+    verkey: Optional[str] = None,
 ):
     """Compose and sign an sd-jwt."""
 
@@ -394,6 +405,7 @@ async def sd_jwt_sign(
         headers=headers,
         did=did,
         verification_method=verification_method,
+        verkey=verkey,
     ).issue()
 
 

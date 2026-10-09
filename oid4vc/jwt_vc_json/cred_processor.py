@@ -9,6 +9,7 @@ from typing import Any
 
 from acapy_agent.admin.request_context import AdminRequestContext
 from acapy_agent.core.profile import Profile
+from acapy_agent.wallet.keys.manager import multikey_to_verkey
 from pydid import DIDUrl
 
 from oid4vc.cred_processor import (
@@ -85,12 +86,11 @@ class JwtVcJsonCredProcessor(Issuer, CredVerifier, PresVerifier):
             payload["vc"]["credentialStatus"] = credential_status
             LOGGER.debug("credential with status: %s", payload)
 
-        jws = await jwt_sign(
-            context.profile,
-            {},
-            payload,
-            verification_method=ex_record.verification_method,
-        )
+        if ex_record.signing_multikey:
+            key_args = {"verkey": multikey_to_verkey(ex_record.signing_multikey)}
+        else:
+            key_args = {"verification_method": ex_record.verification_method}
+        jws = await jwt_sign(context.profile, {}, payload, **key_args)
 
         return jws
 

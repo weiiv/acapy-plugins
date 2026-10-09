@@ -13,7 +13,11 @@ from acapy_agent.wallet.default_verification_key_strategy import (
     BaseVerificationKeyStrategy,
     VerificationKeyStrategyError,
 )
+from acapy_agent.wallet.base import BaseWallet
+from acapy_agent.wallet.error import WalletNotFoundError
 from acapy_agent.wallet.jwt import nym_to_did
+from acapy_agent.wallet.key_type import ED25519, P256
+from acapy_agent.wallet.keys.manager import MultikeyManagerError, multikey_to_verkey
 from aiohttp import web
 from aiohttp_apispec import (
     docs,
@@ -123,6 +127,26 @@ class ExchangeRecordCreateRequestSchema(OpenAPISchema):
             "description": "Identifier used to identify credential supported record",
         },
     )
+    signing_multikey = fields.Str(
+        required=False,
+        metadata={
+            "description": (
+                "Multikey of the wallet key that signs the credential. "
+                "Takes priority over did and verification_method."
+            ),
+            "example": "zDnaeZv4cPZ9zVfMvxWdjnXc1hFXY9LYM894FyZpVsGHnx3oG",
+        },
+    )
+    issuer_id = fields.Str(
+        required=False,
+        validate=Uri(),
+        metadata={
+            "description": (
+                "Issuer identifier for signing_multikey; required for jwt_vc_json"
+            ),
+            "example": "https://issuer.example.com",
+        },
+    )
     credential_subject = fields.Dict(
         required=True,
         metadata={
@@ -135,6 +159,28 @@ class ExchangeRecordCreateRequestSchema(OpenAPISchema):
             "description": "User PIN sent out of band to the user.",
         },
     )
+
+
+async def _check_signing_multikey(context: AdminRequestContext, multikey: str):
+    """Reject a signing_multikey that is malformed, not in the wallet, or unsupported."""
+    try:
+        verkey = multikey_to_verkey(multikey)
+    except (MultikeyManagerError, ValueError) as err:
+        raise web.HTTPBadRequest(reason=f"Invalid signing_multikey: {err}") from err
+    async with context.session() as session:
+        try:
+            key_info = await session.inject(BaseWallet).get_signing_key(verkey)
+        except WalletNotFoundError:
+            raise web.HTTPBadRequest(
+                reason="signing_multikey is not in the wallet"
+            ) from None
+    if key_info.key_type not in (ED25519, P256):
+        raise web.HTTPBadRequest(
+            reason=(
+                "signing_multikey must be ed25519 or p256, "
+                f"not {key_info.key_type.key_type}"
+            )
+        )
 
 
 async def create_exchange(request: web.Request, refresh_id: str | None = None):
@@ -157,11 +203,16 @@ async def create_exchange(request: web.Request, refresh_id: str | None = None):
 
     did = body.get("did", None)
     verification_method = body.get("verification_method", None)
+    signing_multikey = body.get("signing_multikey") or None
+    issuer_id = body.get("issuer_id") or None
     supported_cred_id = body["supported_cred_id"]
     credential_subject = body["credential_subject"]
     pin = body.get("pin")
 
-    if verification_method is None:
+    if signing_multikey:
+        did = verification_method = None
+        await _check_signing_multikey(context, signing_multikey)
+    elif verification_method is None:
         if did is None:
             raise web.HTTPBadRequest(reason="did or verificationMethod required.")
 
@@ -189,10 +240,8 @@ async def create_exchange(request: web.Request, refresh_id: str | None = None):
                     reason=f"Could not determine verification method from DID: {did}"
                 )
 
-    if did:
-        issuer_id = did
-    else:
-        issuer_id = verification_method.split("#")[0]
+    if not signing_multikey:
+        issuer_id = did or verification_method.split("#")[0]
 
     async with context.session() as session:
         try:
@@ -211,6 +260,10 @@ async def create_exchange(request: web.Request, refresh_id: str | None = None):
             " currently registered processors"
         )
     processor = registered_processors.issuer_for_format(supported.format)
+    if signing_multikey and not issuer_id and supported.format == "jwt_vc_json":
+        raise web.HTTPBadRequest(
+            reason="issuer_id is required with signing_multikey for jwt_vc_json"
+        )
     try:
         processor.validate_credential_subject(supported, credential_subject)
     except (ValueError, CredProcessorError) as err:
@@ -224,6 +277,7 @@ async def create_exchange(request: web.Request, refresh_id: str | None = None):
         state=OID4VCIExchangeRecord.STATE_CREATED,
         verification_method=verification_method,
         issuer_id=issuer_id,
+        signing_multikey=signing_multikey,
         refresh_id=refresh_id,
         notification_id=notification_id,
     )

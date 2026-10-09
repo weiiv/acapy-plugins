@@ -570,6 +570,7 @@ async def test_issue_cred(monkeypatch, context, dummy_request):
     mock_ex_record.notification_id = "notif_id"
     mock_ex_record.credential_subject = {"name": "alice"}
     mock_ex_record.verification_method = "did:example:123#key-1"
+    mock_ex_record.signing_multikey = None
     mock_ex_record.save = AsyncMock()
     monkeypatch.setattr(
         "oid4vc.public_routes.credential.OID4VCIExchangeRecord.retrieve_by_refresh_id",
