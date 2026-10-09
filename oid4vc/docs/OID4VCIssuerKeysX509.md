@@ -160,13 +160,13 @@ The exchange provides the signing key for all three processors. The supported cr
 | Path | Signing key given as | Certificates found by |
 | --- | --- | --- |
 | Multikey (recommended for new users) | `signing_multikey` on the exchange | The multikey |
-| DID (backward compatibility) | Exchange `did` or `verification_method`: `did:jwk` or `did:web` | DID → public key → multikey |
+| DID (backward compatibility) | Exchange `did` or `verification_method`: `did:jwk` or `did:web` | Not selected; SD-JWT VC keeps today's static `x5c_cert_chain` or `kid` |
 
 If `signing_multikey` is present, it is used and `did`/`verification_method` are ignored for signing.
 
 ### Certificate selection
 
-At issuance, after computing the credential's expiry, the processor:
+At issuance on the multikey path, after computing the credential's expiry, the processor:
 
 1. Queries certificate records for the signing multikey and its purpose (`sd_jwt_vc_issuer` or `mdoc_ds`).
 2. Keeps those with `not_before` ≤ now and `not_after` ≥ the credential's expiry.
@@ -182,7 +182,7 @@ SD-JWT VC puts the chain in the `x5c` header; mdoc decodes it to DER for `x5chai
 | Exchange creation | Add optional `signing_multikey` and `issuer_id`. If `signing_multikey` is present, use it; `issuer_id` is required only for `jwt_vc_json`. Otherwise require `did` or `verification_method` and behave as today. Make the exchange record's `verification_method` and `issuer_id` optional. |
 | `jwt_sign` | Add an optional keyword `verkey`: read the key type from `get_signing_key`, sign with `sign_message`, and add no `kid` unless the caller supplies one. For a `did:jwk` with no DID record, decode the JWK from the identifier to get the verkey; a DID record, when present, is used first. |
 | `sd_jwt_sign` | Pass `verkey` through as a keyword. |
-| `sd_jwt_vc` | Use certificate selection for `x5c`. A static `x5c_cert_chain` in the supported credential still takes precedence. Omit `iss` when the exchange has no `issuer_id`. |
+| `sd_jwt_vc` | On the multikey path, use certificate selection for `x5c`; without a qualifying certificate the issuance fails, since the credential would carry neither `x5c` nor `kid`. A static `x5c_cert_chain` in the supported credential still takes precedence. Omit `iss` when the exchange has no `issuer_id`. |
 | `jwt_vc_json` | On the multikey path, call `jwt_sign(verkey=...)` with `iss` and `vc.issuer` set to `issuer_id`. |
 | `mso_mdoc` | Sign with the exchange's signing key. Remove `issuer_did` from `vc_additional_data` and its route schemas. Remove the device-key fallback to the exchange `verification_method`; the holder must supply the device key in the proof. Use certificate selection; remove the `x509_certificate_pem` DID-metadata lookup, which has no production data. |
 

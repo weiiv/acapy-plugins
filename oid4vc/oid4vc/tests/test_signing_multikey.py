@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,12 +18,15 @@ from aiohttp import web
 from aries_askar import Key, KeyAlg
 
 from jwt_vc_json.cred_processor import JwtVcJsonCredProcessor
-from oid4vc.cred_processor import CredProcessors
+from oid4vc.cred_processor import CredProcessorError, CredProcessors
 from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.public_routes import PopResult
 from oid4vc.routes.exchange import create_exchange
 from sd_jwt_vc.cred_processor import SdJwtCredIssueProcessor
+from x509_certs import X509CertificateRecord
+from x509_certs.certs import describe, to_x5c
+from x509_certs.tests.conftest import NOW, Pki, wallet_public_key
 
 ISSUER_ID = "https://issuer.example.com"
 HOLDER_KID = "did:key:z6MkgKA7yrw5kYSiDuQFcye4bMaJpcfHFry3Bx45pdWh3s8i#0"
@@ -191,20 +195,68 @@ async def test_jwt_vc_json_issues_with_signing_multikey(
     assert payload["vc"]["issuer"] == ISSUER_ID
 
 
-@pytest.mark.asyncio
-async def test_sd_jwt_vc_issues_with_signing_multikey(
-    context: AdminRequestContext, multikey
-):
-    supported = SupportedCredential(
+def _sd_jwt_supported(**vc_additional_data) -> SupportedCredential:
+    return SupportedCredential(
         format="vc+sd-jwt",
         format_data={"vct": "ExampleCredential"},
-        vc_additional_data={"sd_list": ["/name"]},
+        vc_additional_data={"sd_list": ["/name"], **vc_additional_data},
     )
 
+
+async def _store_certificate(profile: Profile, multikey: str, certs) -> None:
+    async with profile.session() as session:
+        await X509CertificateRecord(
+            multikey=multikey,
+            purpose="sd_jwt_vc_issuer",
+            x5c=to_x5c(certs),
+            **describe(certs[0]),
+        ).save(session)
+
+
+@pytest.mark.asyncio
+async def test_sd_jwt_vc_issues_with_signing_multikey(
+    context: AdminRequestContext, profile: Profile, multikey
+):
+    pki = Pki()
+    leaf = pki.leaf(wallet_public_key(multikey), not_after=NOW + timedelta(days=400))
+    await _store_certificate(profile, multikey, [leaf, pki.intermediate, pki.root])
+
     cred = await SdJwtCredIssueProcessor().issue(
-        {}, supported, _exchange(multikey, issuer_id=None), _pop(), context
+        {}, _sd_jwt_supported(), _exchange(multikey, issuer_id=None), _pop(), context
     )
 
     headers, payload = _verify(cred, multikey)
-    assert headers == {"typ": "vc+sd-jwt", "alg": "ES256"}
+    assert headers == {
+        "typ": "vc+sd-jwt",
+        "alg": "ES256",
+        "x5c": to_x5c([leaf, pki.intermediate]),
+    }
     assert "iss" not in payload
+
+
+@pytest.mark.asyncio
+async def test_sd_jwt_vc_signing_multikey_needs_certificate_covering_expiry(
+    context: AdminRequestContext, profile: Profile, multikey
+):
+    pki = Pki()
+    short = pki.leaf(wallet_public_key(multikey), not_after=NOW + timedelta(days=10))
+    await _store_certificate(profile, multikey, [short, pki.intermediate])
+
+    with pytest.raises(CredProcessorError, match="No sd_jwt_vc_issuer certificate"):
+        await SdJwtCredIssueProcessor().issue(
+            {}, _sd_jwt_supported(), _exchange(multikey), _pop(), context
+        )
+
+
+@pytest.mark.asyncio
+async def test_sd_jwt_vc_static_x5c_chain_wins(context: AdminRequestContext, multikey):
+    cred = await SdJwtCredIssueProcessor().issue(
+        {},
+        _sd_jwt_supported(x5c_cert_chain=["MIIB"]),
+        _exchange(multikey),
+        _pop(),
+        context,
+    )
+
+    headers, _ = _verify(cred, multikey)
+    assert headers["x5c"] == ["MIIB"]

@@ -6,6 +6,7 @@ import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from acapy_agent.admin.request_context import AdminRequestContext
@@ -32,6 +33,7 @@ from oid4vc.models.presentation import OID4VPPresentation
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.pop_result import PopResult
 from oid4vc.status_handler import StatusHandler
+from x509_certs import X509Error, embedded_x5c, select_certificate
 
 LOGGER = logging.getLogger(__name__)
 # Certain claims, if present, are never to be included in the selective disclosures list.
@@ -143,16 +145,6 @@ class SdJwtCredIssueProcessor(Issuer, CredVerifier, PresVerifier):
         else:
             raise ValueError("Unsupported pop holder value")
 
-        # If an x5c cert chain is configured in vc_additional_data, use x5c
-        # as the key-identification header (RFC 7517 §4.7); x5c and kid are
-        # mutually exclusive.
-        x5c_chain = (supported.vc_additional_data or {}).get("x5c_cert_chain")
-        headers = {"typ": supported.format}  # "vc+sd-jwt" or "dc+sd-jwt"
-        if x5c_chain:
-            headers["x5c"] = x5c_chain
-        elif ex_record.verification_method:
-            headers["kid"] = ex_record.verification_method
-
         # exp can be provided in credential_subject or vc_additional_data;
         # default to 1 year from issuance if not set
         exp_seconds = (
@@ -160,11 +152,25 @@ class SdJwtCredIssueProcessor(Issuer, CredVerifier, PresVerifier):
             or supported.vc_additional_data.get("exp_seconds")
             or (365 * 24 * 3600)
         )
+        expires_at = current_time + int(exp_seconds)
+
+        # If an x5c cert chain is configured in vc_additional_data, use x5c
+        # as the key-identification header (RFC 7517 §4.7); x5c and kid are
+        # mutually exclusive.
+        x5c_chain = (supported.vc_additional_data or {}).get("x5c_cert_chain")
+        if not x5c_chain and ex_record.signing_multikey:
+            x5c_chain = await _issuer_x5c(context, ex_record.signing_multikey, expires_at)
+        headers = {"typ": supported.format}  # "vc+sd-jwt" or "dc+sd-jwt"
+        if x5c_chain:
+            headers["x5c"] = x5c_chain
+        elif ex_record.verification_method:
+            headers["kid"] = ex_record.verification_method
+
         claims = {
             **claims,
             "vct": vct,
             "iat": current_time,
-            "exp": current_time + int(exp_seconds),
+            "exp": expires_at,
         }
         if ex_record.issuer_id:
             claims["iss"] = ex_record.issuer_id
@@ -364,6 +370,23 @@ class SDJWTIssuerACAPy(SDJWTIssuer):
 
 
 Unset = object()
+
+
+async def _issuer_x5c(
+    context: AdminRequestContext, multikey: str, expires_at: int
+) -> List[str]:
+    """x5c of the issuer certificate covering the credential's lifetime."""
+    async with context.profile.session() as session:
+        try:
+            record = await select_certificate(
+                session,
+                multikey,
+                "sd_jwt_vc_issuer",
+                datetime.fromtimestamp(expires_at, timezone.utc),
+            )
+        except X509Error as err:
+            raise CredProcessorError(str(err)) from err
+    return embedded_x5c(record)
 
 
 async def sd_jwt_sign(
