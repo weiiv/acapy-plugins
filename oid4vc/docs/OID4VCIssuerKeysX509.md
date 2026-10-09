@@ -104,28 +104,29 @@ Repository: acapy-plugins. A plugin package named `x509_certs` in the OID4VC dis
 | `GET /x509/trust-anchors` | List; filter by `purpose`, `subject` |
 | `GET /x509/trust-anchors/{anchor_id}` | Anchor plus parsed details |
 | `DELETE /x509/trust-anchors/{anchor_id}` | Remove a trust anchor |
-| `POST /x509/verify` | Verify a chain against the trust anchors for a purpose |
+| `POST /x509/verify` | Verify a chain for a certificate purpose against the trust anchors of the matching anchor purpose |
 
 ### Records
 
 - Certificate record: `cert_id`, tags `multikey`, `purpose`, `subject`, `not_before`, `not_after`; value holds the chain in JWS `x5c` format (standard base64 DER, leaf first) and the parsed issuer and SANs. A key can have several certificates, for renewal or different purposes.
-- Trust-anchor record: `anchor_id`, tags `purpose`, `subject`. Adopt the existing `TrustAnchorRecord` schema where it fits. Records already stored by `mso_mdoc` are not migrated.
+- Trust-anchor record: `anchor_id`, tags `purpose` (required), `subject`. Adopt the existing `TrustAnchorRecord` schema where it fits. Records already stored by `mso_mdoc` are not migrated.
 - The `kid` filter resolves to a multikey through the key's `kid` tags when listing; certificate records do not store `kid`.
 - All records are per tenant: routes use `tenant_authentication` and store in the calling tenant's wallet.
 
 ### Purposes
 
-A fixed list; other values are rejected.
+Certificates and trust anchors each require a purpose from a fixed list; other values are rejected. Certificate purposes name the leaf's role, and anchor purposes name the CA role, following ISO 18013-5's IACA (Issuing Authority CA). No specification names the CA for SD-JWT VC issuers: SD-JWT VC leaves it to policy and HAIP 1.0 calls it a trust anchor.
 
-| Value | Applies to | Meaning |
+| Certificate purpose | Meaning | Verified against anchor purpose |
 | --- | --- | --- |
-| `mdoc_ds` | Certificates | mdoc document-signer certificate |
-| `sd_jwt_vc_issuer` | Certificates | SD-JWT VC issuer certificate |
-| `iaca` | Trust anchors | mdoc issuing root, the value `mso_mdoc` uses today |
+| `mdoc_ds` | mdoc document-signer certificate | `iaca` (mdoc issuing root) |
+| `sd_jwt_vc_issuer` | SD-JWT VC issuer certificate | `sd_jwt_vc_ca` |
+
+`POST /x509/verify` takes a certificate purpose and uses only anchors with the matching anchor purpose. The issuer needs no trust anchors to issue; anchors are for verification.
 
 ### Self-signed certificates
 
-`POST /x509/certificates/self-signed` is disabled unless a plugin setting enables it.
+`POST /x509/certificates/self-signed` is disabled unless a plugin setting enables it. HAIP 1.0 (Section 6.1.1) forbids a self-signed certificate signing an SD-JWT VC, so these certificates are for demos only.
 
 ### Moving into ACA-Py later
 
@@ -172,7 +173,7 @@ At issuance, after computing the credential's expiry, the processor:
 3. Picks the one with the earliest `not_after`; on a tie, the earlier `not_before`.
 4. Fails the issuance if none qualifies.
 
-SD-JWT VC puts the chain in the `x5c` header; mdoc decodes it to DER for `x5chain`. `jwt_vc_json` embeds no certificate.
+SD-JWT VC puts the chain in the `x5c` header; mdoc decodes it to DER for `x5chain`. `jwt_vc_json` embeds no certificate. The embedded chain leaves out a self-signed root at its end, because HAIP 1.0 (Section 6.1.1) forbids the trust anchor in `x5c`; the stored chain may include it.
 
 ### Changes
 
@@ -208,7 +209,8 @@ Future OID4VC issuance does not depend on DIDs. For backward compatibility, the 
 ## mso_mdoc Cleanup
 
 - `mso_mdoc` signs only with wallet keys, Askar or HSM.
-- Its certificate, key, and trust-anchor endpoints are removed once the `x509_certs` plugin is in place. On the `kmslite` branch, `/mso-mdoc/signing-keys` is already removed; `/mso-mdoc/trust-anchors` remains until then.
+- Its certificate, key, and trust-anchor endpoints are removed once the `x509_certs` plugin is in place. `/mso-mdoc/signing-keys` is already removed; `/mso-mdoc/trust-anchors` remains until then.
+- mdoc verification then reads `x509_certs` trust anchors with purpose `iaca` only, as it reads `mso_mdoc` anchors today.
 - For upstream users of `/mso-mdoc/signing-keys` this is a breaking change: private keys are not imported, so they create new wallet or HSM keys and obtain new certificates.
 
 ## End-to-End Flow (SD-JWT VC, HSM key)
