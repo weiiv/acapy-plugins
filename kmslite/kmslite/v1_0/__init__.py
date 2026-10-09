@@ -2,11 +2,9 @@
 
 import logging
 
-from acapy_agent.admin.base_server import BaseAdminServer
 from acapy_agent.config.injection_context import InjectionContext
 from acapy_agent.wallet.signer_registry import SignerRegistry
 
-from . import routes
 from .config import KmsLiteConfig
 from .signers.pkcs11 import PKCS11Signer
 
@@ -63,8 +61,5 @@ async def setup(context: InjectionContext) -> None:
     else:
         _register_signer(registry, cfg)
 
-    admin_server = context.inject_or(BaseAdminServer)
-    if admin_server is None:
-        LOGGER.warning("kmslite: no BaseAdminServer; routes not registered")
-        return
-    await routes.register(admin_server.app)
+    # Admin routes are registered by ACA-Py's plugin registry, which calls
+    # kmslite.v1_0.routes.register(app) once the admin server exists.

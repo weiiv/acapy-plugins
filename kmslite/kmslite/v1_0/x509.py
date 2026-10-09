@@ -15,6 +15,8 @@ from acapy_agent.wallet.error import WalletError
 from acapy_agent.wallet.key_type import KeyType, P256
 from acapy_agent.wallet.util import b58_to_bytes
 
+from .signers import SignerError
+
 _CURVE_BY_KEY_TYPE = {P256: ec.SECP256R1}
 
 # Field-name → x509 NameOID for CSR subject building.
@@ -31,8 +33,7 @@ def _curve_for(key_type: KeyType) -> ec.EllipticCurve:
     cls = _CURVE_BY_KEY_TYPE.get(key_type)
     if cls is None:
         raise WalletError(
-            f"unsupported key_type {key_type} "
-            f"(supported: {list(_CURVE_BY_KEY_TYPE)})"
+            f"unsupported key_type {key_type} (supported: {list(_CURVE_BY_KEY_TYPE)})"
         )
     return cls()
 
@@ -43,9 +44,7 @@ def _hash_alg_for(key_type: KeyType) -> hashes.HashAlgorithm:
     raise WalletError(f"no hash paired with key_type {key_type}")
 
 
-def verkey_to_public_key(
-    verkey: str, key_type: KeyType
-) -> ec.EllipticCurvePublicKey:
+def verkey_to_public_key(verkey: str, key_type: KeyType) -> ec.EllipticCurvePublicKey:
     """Rebuild an EllipticCurvePublicKey from a base58 verkey."""
     return ec.EllipticCurvePublicKey.from_encoded_point(
         _curve_for(key_type), b58_to_bytes(verkey)
@@ -92,7 +91,7 @@ class WalletBackedPrivateKey(EllipticCurvePrivateKey):
         )
         raw = fut.result()
         if raw is None or len(raw) % 2:
-            raise WalletError(
+            raise SignerError(
                 f"WalletBackedPrivateKey: bad signature length "
                 f"({0 if raw is None else len(raw)})"
             )
@@ -146,18 +145,14 @@ def _build_csr_sync(
     return csr.public_bytes(serialization.Encoding.PEM)
 
 
-async def build_csr(
-    wallet, verkey: str, key_type: KeyType, subject: dict
-) -> bytes:
+async def build_csr(wallet, verkey: str, key_type: KeyType, subject: dict) -> bytes:
     """PEM-encoded CSR whose subject public key is `verkey`; signed via wallet."""
     loop = asyncio.get_running_loop()
     adapter = WalletBackedPrivateKey(wallet, verkey, key_type, loop=loop)
     return await asyncio.to_thread(_build_csr_sync, adapter, subject, key_type)
 
 
-def assert_cert_matches_verkey(
-    cert_pem: bytes, verkey: str, key_type: KeyType
-) -> None:
+def assert_cert_matches_verkey(cert_pem: bytes, verkey: str, key_type: KeyType) -> None:
     """Raise WalletError if the cert's SPKI doesn't match `verkey`."""
     try:
         cert = x509.load_pem_x509_certificate(cert_pem)

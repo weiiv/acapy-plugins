@@ -15,6 +15,8 @@ from acapy_agent.wallet.error import WalletError
 from acapy_agent.wallet.key_type import P256, KeyType
 from acapy_agent.wallet.util import bytes_to_b58
 
+from . import SignerError
+
 LOGGER = logging.getLogger(__name__)
 AUDIT = logging.getLogger("kmslite.audit")
 
@@ -25,22 +27,22 @@ _CURVE_OID_BY_KEY_TYPE = {P256: "secp256r1"}
 def _unwrap_ec_point(der: bytes) -> bytes:
     """DER OCTET STRING → raw SEC1 point (short-form length only)."""
     if len(der) < 2 or der[0] != _OCTET_STRING_TAG:
-        raise WalletError("PKCS11 EC_POINT: not a DER OCTET STRING")
+        raise SignerError("PKCS11 EC_POINT: not a DER OCTET STRING")
     length = der[1]
     if length & 0x80 or length != len(der) - 2:
-        raise WalletError("PKCS11 EC_POINT: unexpected DER length encoding")
+        raise SignerError("PKCS11 EC_POINT: unexpected DER length encoding")
     return der[2:]
 
 
 def _sec1_compress(point: bytes) -> bytes:
     """Compress an uncompressed SEC1 point; pass through if already compressed."""
     if not point:
-        raise WalletError("PKCS11 EC_POINT: empty")
+        raise SignerError("PKCS11 EC_POINT: empty")
     prefix = point[0]
     if prefix in (0x02, 0x03):
         return point
     if prefix != 0x04 or (len(point) - 1) % 2:
-        raise WalletError(f"PKCS11 EC_POINT: bad prefix/length 0x{prefix:02x}")
+        raise SignerError(f"PKCS11 EC_POINT: bad prefix/length 0x{prefix:02x}")
     n = (len(point) - 1) // 2
     x, y = point[1 : 1 + n], point[1 + n :]
     return bytes([0x03 if (y[-1] & 1) else 0x02]) + x
@@ -53,17 +55,17 @@ def _der_point_to_verkey(der: bytes) -> str:
 
 @contextmanager
 def _wrap_pkcs11_errors(op: str, key_ref: str):
-    """Rethrow pkcs11 errors as WalletError with op-labeled messages."""
+    """Rethrow pkcs11 errors as SignerError with op-labeled messages."""
     try:
         yield
     except pkcs11.NoSuchKey as err:
-        raise WalletError(f"PKCS11 {op}: no key on token with label {key_ref!r}") from err
+        raise SignerError(f"PKCS11 {op}: no key on token with label {key_ref!r}") from err
     except pkcs11.MultipleObjectsReturned as err:
-        raise WalletError(
+        raise SignerError(
             f"PKCS11 {op}: key_ref {key_ref!r} is ambiguous on the token"
         ) from err
     except PKCS11Error as err:
-        raise WalletError(f"PKCS11 {op}: {err}") from err
+        raise SignerError(f"PKCS11 {op}: {err}") from err
 
 
 class PKCS11Signer:
@@ -82,7 +84,7 @@ class PKCS11Signer:
             raise ValueError("pool_size must be >= 1")
         self._provider_name = provider_name
         self._lib = pkcs11.lib(lib_path)
-        self._token = self._lib.get_token(token_label=token_label)
+        self._token = self._open_token(lib_path, token_label, slot)
         self._pool: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=pool_size)
         for _ in range(pool_size):
             self._pool.put_nowait(self._token.open(user_pin=pin, rw=True))
@@ -106,6 +108,26 @@ class PKCS11Signer:
             raise ValueError(
                 f"kmslite.pkcs11: missing required key {err.args[0]!r}"
             ) from None
+
+    def _open_token(self, lib_path: str, token_label: str, slot: Optional[int]):
+        """Look the token up by label; `slot` narrows the match when configured."""
+        # get_tokens() has no slot-id filter, so slot narrowing happens here.
+        matches = [
+            token
+            for token in self._lib.get_tokens(token_label=token_label)
+            if slot is None or token.slot.slot_id == slot
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        visible = ", ".join(
+            f"slot {s.slot_id}: {s.get_token().label!r}"
+            for s in self._lib.get_slots(token_present=True)
+        )
+        raise SignerError(
+            f"PKCS11: matched {len(matches)} tokens for token_name={token_label!r} "
+            f"slot={slot!r}, need exactly 1. Visible via {lib_path!r}: "
+            f"{visible or '<no slot has a token present>'}"
+        )
 
     @asynccontextmanager
     async def _session(self):

@@ -6,7 +6,7 @@
 #   2. Build the native PKCS#11 .dylib (universal: arm64 + x86_64).
 #   3. Start the BouncyHsm server container.
 #
-# After this runs, `poetry run python integration/verify_bouncyhsm.py`
+# After this runs, `poetry run python integration/bouncyhsm/devtools/verify_bouncyhsm.py`
 # confirms the round-trip.
 
 set -euo pipefail
@@ -26,7 +26,7 @@ fi
 echo "Container engine: $CONTAINER_ENGINE"
 
 BOUNCYHSM_VERSION="v2.3.0"
-SRC_DIR="bouncyhsm-src"
+SRC_DIR="src"
 LIB_DIR="lib"
 
 echo "[1/3] Fetching BouncyHsm source (${BOUNCYHSM_VERSION})..."
@@ -51,7 +51,7 @@ echo "[3/3] Starting BouncyHsm server ($CONTAINER_ENGINE)..."
 
 echo
 echo "Done. Verify with:"
-echo "    poetry run python integration/verify_bouncyhsm.py"
+echo "    poetry run python integration/bouncyhsm/devtools/verify_bouncyhsm.py"
 echo
 echo "Web UI:  http://localhost:8080"
 echo "PKCS#11: TCP 127.0.0.1:8765"

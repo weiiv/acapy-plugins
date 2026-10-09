@@ -6,7 +6,7 @@ Idempotent — safe to run multiple times.
 
 Preconditions:
   - BouncyHsm server up: `docker compose -f docker-compose.bouncyhsm.yml up -d`
-  - Native dylib built:  `make -C bouncyhsm-src/build_macos universal`
+  - Native dylib built:  `make -C src/build_macos universal`
     (both installed by `./setup.sh`).
 
 Steps:
@@ -26,8 +26,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 
 HERE = pathlib.Path(__file__).resolve().parent
-INTEGRATION = HERE
-DYLIB = INTEGRATION / "lib" / "BouncyHsm.Pkcs11Lib.dylib"
+DYLIB = HERE / "lib" / "BouncyHsm.Pkcs11Lib.dylib"
 
 TOKEN_LABEL = "kmslite-dev"
 USER_PIN = "1234"

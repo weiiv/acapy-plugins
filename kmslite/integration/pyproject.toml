@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "plugin-globals-tests"
+name = "kmslite-tests"
 version = "0.1.0"
 description = ""
 authors = []
@@ -10,6 +10,8 @@ python = "^3.13"
 pytest = "^9.1.1"
 pytest-asyncio = "^1.2.0"
 requests = "^2.32.0"
+# Used to inspect the CSRs and certificates returned by the admin API.
+cryptography = "<51.0.0"
 
 [tool.poetry.group.dev.dependencies]
 

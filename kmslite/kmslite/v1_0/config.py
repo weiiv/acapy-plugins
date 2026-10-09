@@ -27,9 +27,7 @@ class ConfigError(ValueError):
 
 
 def _resolve_pkcs11_cfg(pkcs11_cfg: Mapping[str, Any]) -> dict:
-    library_path = pkcs11_cfg.get("library_path") or getenv(
-        "KMSLITE_PKCS11_LIBRARY_PATH"
-    )
+    library_path = pkcs11_cfg.get("library_path") or getenv("KMSLITE_PKCS11_LIBRARY_PATH")
     if not library_path:
         raise ConfigError("pkcs11.library_path", "KMSLITE_PKCS11_LIBRARY_PATH")
 

@@ -177,9 +177,7 @@ def test_provider_only_raises():
 
 
 def test_unknown_protocol_raises():
-    settings = _FakeSettings(
-        {"kmslite": {"provider": "hsm", "protocol": "voodoo"}}
-    )
+    settings = _FakeSettings({"kmslite": {"provider": "hsm", "protocol": "voodoo"}})
     with pytest.raises(ValueError, match="unknown protocol"):
         KmsLiteConfig.from_settings(settings)
 

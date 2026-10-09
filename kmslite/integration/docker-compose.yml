@@ -1,9 +1,41 @@
-version: '3'
 #***************************************************************
 # integration level test agents                                *
 #***************************************************************
 
 services:
+  bouncyhsm:
+    build:
+      context: ./bouncyhsm/server
+      args:
+        BOUNCYHSM_VERSION: "2.3.0"
+    image: kmslite/bouncyhsm:2.3.0
+
+  # Publishes the PKCS#11 client library on a shared volume and provisions the
+  # token. It idles once ready rather than exiting, because
+  # `up --exit-code-from tests` tears down the stack when any container exits.
+  hsm-init:
+    build:
+      context: ./bouncyhsm
+      dockerfile: Dockerfile.pkcs11lib
+      args:
+        BOUNCYHSM_VERSION: "2.3.0"
+    image: kmslite/bouncyhsm-pkcs11:2.3.0
+    environment:
+      BOUNCY_HSM_HTTP: http://bouncyhsm:8080
+      KMSLITE_PKCS11_TOKEN_NAME: kmslite-test
+      KMSLITE_PKCS11_PIN: "1234"
+    volumes:
+      - pkcs11lib:/shared
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/hsm-ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+    depends_on:
+      - bouncyhsm
+
+  # kmslite is left unconfigured on bob, so bob covers the "no signer" path.
   bob:
     image: plugin-image
     build:
@@ -16,6 +48,20 @@ services:
   alice:
     image: plugin-image
     command: start --arg-file integration.yml --label alice -e http://alice:3000 --log-level info
+    environment:
+      # Read by the BouncyHsm client library itself, not by kmslite.
+      BOUNCY_HSM_CFG_STRING: Server=bouncyhsm;Port=8765;
+      KMSLITE_PROVIDER: bouncyhsm
+      KMSLITE_PROTOCOL: pkcs11
+      KMSLITE_PKCS11_LIBRARY_PATH: /opt/bouncyhsm/BouncyHsm.Pkcs11Lib.so
+      KMSLITE_PKCS11_TOKEN_NAME: kmslite-test
+      KMSLITE_PKCS11_PIN: "1234"
+      KMSLITE_PKCS11_POOL_SIZE: "2"
+    volumes:
+      - pkcs11lib:/opt/bouncyhsm:ro
+    depends_on:
+      hsm-init:
+        condition: service_healthy
 
   tests:
       container_name: juggernaut
@@ -24,10 +70,13 @@ services:
         dockerfile: Dockerfile.test.runner
       environment:
         - WAIT_BEFORE=3
-        - WAIT_HOSTS=bob:3000, alice:3000
-        - WAIT_TIMEOUT=60
+        - WAIT_HOSTS=bob:3001, alice:3001
+        - WAIT_TIMEOUT=120
         - WAIT_SLEEP_INTERVAL=1
         - WAIT_HOST_CONNECT_TIMEOUT=30
       depends_on:
         - bob
         - alice
+
+volumes:
+  pkcs11lib:

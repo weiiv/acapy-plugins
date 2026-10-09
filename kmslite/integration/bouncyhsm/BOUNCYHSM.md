@@ -32,7 +32,7 @@ built from the release ZIP inside the Docker image.
 ## Bring it up
 
 ```sh
-cd integration
+cd integration/bouncyhsm/devtools
 ./setup.sh                              # clones + builds + starts server
 poetry run python verify_bouncyhsm.py   # provisions slot + round-trip signs
 ```
@@ -56,8 +56,8 @@ Expected on first successful run:
 
 | Step | Detail |
 |---|---|
-| 1 | `git clone --depth 1 --branch v2.3.0 https://github.com/harrison314/BouncyHsm.git bouncyhsm-src` |
-| 2 | `make -C bouncyhsm-src/build_macos universal` → produces universal dylib (x86_64 + arm64) → copies into `./lib/` |
+| 1 | `git clone --depth 1 --branch v2.3.0 https://github.com/harrison314/BouncyHsm.git src` |
+| 2 | `make -C src/build_macos universal` → produces universal dylib (x86_64 + arm64) → copies into `./lib/` |
 | 3 | `docker compose -f docker-compose.bouncyhsm.yml up -d --build` — server on 8080/8765 |
 
 Re-run any time; each step is idempotent.
@@ -76,7 +76,7 @@ export HSM_PIN=1234        # matches USER_PIN in verify_bouncyhsm.py
 aca-py start \
   -o kmslite.provider=hsm \
   -o kmslite.protocol=pkcs11 \
-  -o kmslite.pkcs11.library_path=/Users/YOU/Workspace/di/vc/acapy-plugins/kmslite/integration/lib/BouncyHsm.Pkcs11Lib.dylib \
+  -o kmslite.pkcs11.library_path=/Users/YOU/Workspace/di/vc/acapy-plugins/kmslite/integration/bouncyhsm/devtools/lib/BouncyHsm.Pkcs11Lib.dylib \
   -o kmslite.pkcs11.token_name=kmslite-dev \
   -o kmslite.pkcs11.pin_env=HSM_PIN \
   -o kmslite.pkcs11.pool_size=4 \
@@ -92,7 +92,7 @@ plugin_config:
     provider: hsm
     protocol: pkcs11
     pkcs11:
-      library_path: /Users/YOU/Workspace/di/vc/acapy-plugins/kmslite/integration/lib/BouncyHsm.Pkcs11Lib.dylib
+      library_path: /Users/YOU/Workspace/di/vc/acapy-plugins/kmslite/integration/bouncyhsm/devtools/lib/BouncyHsm.Pkcs11Lib.dylib
       token_name: kmslite-dev
       pin_env: HSM_PIN     # names an env var; set HSM_PIN=1234 separately
       pool_size: 4
@@ -119,7 +119,7 @@ docker compose -f docker-compose.bouncyhsm.yml down -v
 
 # throw away everything and start over
 docker compose -f docker-compose.bouncyhsm.yml down -v
-rm -rf bouncyhsm-src lib
+rm -rf src lib
 ./setup.sh
 ```
 
@@ -127,10 +127,18 @@ rm -rf bouncyhsm-src lib
 
 | File | Purpose |
 |---|---|
+| `server/Dockerfile`      | Builds the .NET server image from the release ZIP |
+| `Dockerfile.pkcs11lib`   | Compiles the Linux PKCS#11 client for the CI stack |
+| `hsm-init.sh`            | Publishes that client and provisions the CI token |
+| `devtools/`              | macOS host loop — unused by CI (see below) |
+
+| `devtools/` file | Purpose |
+|---|---|
 | `docker-compose.bouncyhsm.yml` | Server-only compose (this doc's setup) |
-| `bouncyhsm-server/Dockerfile`  | Builds the .NET server image from the release ZIP |
 | `setup.sh`                     | One-shot bring-up |
 | `verify_bouncyhsm.py`          | Round-trip sanity check |
 | `lib/`                         | Built `.dylib`s (gitignored) |
-| `bouncyhsm-src/`               | Source clone (gitignored) |
-| `docker-compose.yml`, `Dockerfile.test.runner`, `tests/` | Pre-existing DIDComm integration tests — unrelated to HSM |
+| `src/`                         | Source clone (gitignored) |
+
+The CI integration tests in [`../`](../) bring up their own BouncyHsm and do
+not use `devtools/` at all.

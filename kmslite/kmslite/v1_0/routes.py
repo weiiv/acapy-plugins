@@ -28,6 +28,7 @@ from acapy_agent.wallet.signer_registry import SignerRegistry
 from acapy_agent.wallet.util import b58_to_bytes
 
 from .config import KmsLiteConfig
+from .signers import SignerError
 from .x509 import assert_cert_matches_verkey, build_csr, verkey_to_public_key
 
 LOGGER = logging.getLogger(__name__)
@@ -144,6 +145,14 @@ def _keyalg_for(key_type_name: str) -> KeyAlg:
         )
 
 
+def _backend_failure(err: SignerError, action: str) -> web.HTTPException:
+    """Log a backend fault and build a 502 whose reason leaks no backend detail."""
+    LOGGER.error("kmslite: external signer failed to %s", action, exc_info=err)
+    return web.HTTPBadGateway(
+        reason=f"external signer failed to {action}; see agent logs"
+    )
+
+
 async def _get_local_did(wallet: BaseWallet, did: str) -> DIDInfo:
     try:
         return await wallet.get_local_did(did)
@@ -189,15 +198,19 @@ async def create_kms_did(request: web.BaseRequest):
 
     try:
         verkey: str = await signer.generate_keypair(key_ref, key_type)
+    except SignerError as err:
+        raise _backend_failure(err, "generate a key") from err
+    except WalletError as err:
+        raise web.HTTPBadRequest(reason=str(err)) from err
+
+    try:
         did = DIDParametersValidation(did_methods).validate_or_derive_did(
             did_method, key_type, b58_to_bytes(verkey), options.get("did")
         )
     except WalletError as err:
         raise web.HTTPBadRequest(reason=str(err)) from err
     if not did:
-        raise web.HTTPBadRequest(
-            reason=f"cannot resolve a DID for method {method!r}"
-        )
+        raise web.HTTPBadRequest(reason=f"cannot resolve a DID for method {method!r}")
 
     metadata = {"signer": cfg.provider, "key_ref": key_ref}
     try:
@@ -262,9 +275,9 @@ async def create_kms_did_csr(request: web.BaseRequest):
         wallet = session.inject(BaseWallet)
         did_info = await _get_local_did(wallet, request.match_info["did"])
         try:
-            csr_pem = await build_csr(
-                wallet, did_info.verkey, did_info.key_type, subject
-            )
+            csr_pem = await build_csr(wallet, did_info.verkey, did_info.key_type, subject)
+        except SignerError as err:
+            raise _backend_failure(err, "sign the CSR") from err
         except WalletError as err:
             raise web.HTTPBadRequest(reason=str(err)) from err
 
@@ -323,9 +336,7 @@ async def register(app: web.Application) -> None:
                 allow_head=False,
             ),
             web.post("/kmslite/did/{did}/csr", create_kms_did_csr),
-            web.post(
-                "/kmslite/did/{did}/certificate", bind_kms_did_certificate
-            ),
+            web.post("/kmslite/did/{did}/certificate", bind_kms_did_certificate),
             web.get(
                 "/kmslite/did/{did}/certificate",
                 get_kms_did_certificate,

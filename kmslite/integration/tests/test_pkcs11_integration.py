@@ -1,141 +1,110 @@
-"""Integration tests for kmslite against a real BouncyHSM.
+"""Black-box integration tests for kmslite's signing delegation.
 
-Run inside the `integration-test-runner` container (docker compose):
+Scoped deliberately: only cases a unit test cannot reach are here, because the
+unit suite mocks `pkcs11` and patches route registration, so it cannot observe
+a real token, real Askar storage, or whether the routes are mounted at all.
+Payload validation, PEM parsing and the X.509 matching rules are unit-tested.
 
-    docker compose -f docker-compose.yml up --build --exit-code-from test-runner
+`alice` runs the plugin configured against the BouncyHsm container; `bob` runs
+the same image with kmslite unconfigured. Nothing here imports the plugin.
 
-The tests exercise PKCS11Signer end-to-end against BouncyHsm on
-`Server=bouncyhsm; Port=8765;` (see docker-compose.yml env).
-
-Prerequisite: a token labelled `kmslite-test` must exist with User PIN `1234`.
-The `_ensure_test_token` fixture provisions it via BouncyHsm's REST API if
-missing (idempotent).
+    docker compose up --build --exit-code-from tests
 """
 
-import asyncio
-import os
 import uuid
 
-import httpx
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
-from acapy_agent.wallet.key_type import P256
+from . import ALICE, BOB, get, post
 
-from kmslite.v1_0.signers.pkcs11 import PKCS11Signer
-
-
-PKCS11_LIB = os.environ.get(
-    "KMSLITE_PKCS11_LIB",
-    "/opt/bouncyhsm-client/native/Linux-x64/BouncyHsm.Pkcs11Lib.so",
-)
-TOKEN_LABEL = os.environ.get("KMSLITE_TOKEN_LABEL", "kmslite-test")
-USER_PIN = os.environ.get("KMSLITE_USER_PIN", "1234")
-SO_PIN = os.environ.get("KMSLITE_SO_PIN", "12345678")
-BOUNCY_HTTP = os.environ.get("BOUNCY_HSM_HTTP", "http://bouncyhsm:8080")
+SUBJECT = {"country": "CA", "organization": "kmslite", "cn": "kmslite.example.com"}
 
 
-@pytest.fixture(scope="session", autouse=True)
-def ensure_test_token():
-    """Create the test token via BouncyHsm REST API if it doesn't exist."""
-    with httpx.Client(base_url=BOUNCY_HTTP, timeout=10) as client:
-        slots = client.get("/Slot").json()
-        found = any(
-            (s.get("Token") or {}).get("Label") == TOKEN_LABEL for s in slots
-        )
-        if not found:
-            resp = client.post(
-                "/Slot",
-                json={
-                    "Description": "kmslite integration test token",
-                    "Token": {
-                        "Label": TOKEN_LABEL,
-                        "UserPin": USER_PIN,
-                        "SoPin": SO_PIN,
-                        "SerialNumber": "kmslite01",
-                        "SimulateHwRng": False,
-                        "SimulateQualifiedArea": False,
-                    },
-                },
-            )
-            resp.raise_for_status()
-    yield
-
-
-@pytest.fixture
-def signer() -> PKCS11Signer:
-    """Build a real PKCS11Signer talking to BouncyHsm."""
-    return PKCS11Signer(
-        lib_path=PKCS11_LIB,
-        token_label=TOKEN_LABEL,
-        pin=USER_PIN,
-        pool_size=2,
+def _create_did(agent: str = ALICE, key_ref: str = None):
+    return post(
+        agent,
+        "/kmslite/did/create",
+        json={
+            "method": "key",
+            "key_type": "p256",
+            "options": {"key_ref": key_ref or f"kmslite-int-{uuid.uuid4()}"},
+        },
     )
 
 
-@pytest.mark.asyncio
-async def test_generate_keypair_returns_p256_verkey(signer):
-    key_ref = f"kmslite-int-{uuid.uuid4()}"
-    verkey = await signer.generate_keypair(key_ref, P256)
-
-    from acapy_agent.wallet.util import b58_to_bytes
-
-    raw = b58_to_bytes(verkey)
-    assert len(raw) == 33, "verkey should be base58 of 33-byte SEC1-compressed point"
-    assert raw[0] in (0x02, 0x03), "compressed point prefix should be 0x02 or 0x03"
+def _public_key(did: str) -> ec.EllipticCurvePublicKey:
+    resp = get(ALICE, f"/kmslite/did/{did}/public-key")
+    assert resp.ok, resp.content
+    return serialization.load_pem_public_key(resp.json()["public_key_pem"].encode())
 
 
-@pytest.mark.asyncio
-async def test_sign_and_verify_end_to_end(signer):
-    """Full round-trip: HSM signs, cryptography lib verifies with the same pubkey."""
-    from cryptography.hazmat.primitives.asymmetric import ec, utils
-    from cryptography.hazmat.primitives import hashes
-
-    from kmslite.v1_0.x509 import verkey_to_public_key
-
-    key_ref = f"kmslite-int-sign-{uuid.uuid4()}"
-    verkey = await signer.generate_keypair(key_ref, P256)
-    pubkey = verkey_to_public_key(verkey, P256)
-
-    payload = b"hello from kmslite integration test"
-    raw_sig = await signer.sign(key_ref, payload, P256)
-
-    # Raw r||s from HSM → DER for cryptography.verify().
-    assert len(raw_sig) == 64
-    r = int.from_bytes(raw_sig[:32], "big")
-    s = int.from_bytes(raw_sig[32:], "big")
-    der = utils.encode_dss_signature(r, s)
-
-    pubkey.verify(der, payload, ec.ECDSA(hashes.SHA256()))
+def _csr(did: str) -> x509.CertificateSigningRequest:
+    resp = post(ALICE, f"/kmslite/did/{did}/csr", json={"subject": SUBJECT})
+    assert resp.ok, resp.content
+    return x509.load_pem_x509_csr(resp.json()["csr_pem"].encode())
 
 
-@pytest.mark.asyncio
-async def test_get_public_key_matches_generate(signer):
-    key_ref = f"kmslite-int-getpub-{uuid.uuid4()}"
-    verkey_created = await signer.generate_keypair(key_ref, P256)
-    verkey_reread = await signer.get_public_key(key_ref, P256)
-    assert verkey_created == verkey_reread
+@pytest.fixture(scope="session")
+def hsm_did() -> dict:
+    """One HSM-backed did:key, shared by the read-only tests."""
+    resp = _create_did()
+    assert resp.ok, resp.content
+    return resp.json()
 
 
-@pytest.mark.asyncio
-async def test_session_pool_handles_concurrent_signs(signer):
-    """pool_size=2 must handle overlapping signs without corruption."""
-    key_ref = f"kmslite-int-concurrent-{uuid.uuid4()}"
-    await signer.generate_keypair(key_ref, P256)
+def test_hsm_did_is_stored_as_an_ordinary_wallet_did(hsm_did):
+    """Public-only Askar entry plus store_did, not a kmslite-private record."""
+    resp = get(ALICE, "/wallet/did", params={"did": hsm_did["did"]})
+    assert resp.ok, resp.content
+    assert [d["did"] for d in resp.json()["results"]] == [hsm_did["did"]]
+    assert hsm_did["metadata"]["signer"] == "bouncyhsm"
 
-    payloads = [f"msg-{i}".encode() for i in range(8)]
-    sigs = await asyncio.gather(
-        *(signer.sign(key_ref, p, P256) for p in payloads)
+
+def test_duplicate_key_ref_is_rejected_by_the_token(hsm_did):
+    """Uniqueness is the token's answer, not our pre-check against a mock."""
+    resp = _create_did(key_ref=hsm_did["metadata"]["key_ref"])
+    assert resp.status_code == 400, resp.content
+
+
+def test_csr_is_signed_by_the_hsm_held_key(hsm_did):
+    """Signing reached the HSM and our SEC1/DER codecs match a real module.
+
+    The proof-of-possession verifies against the CSR's own public key, which
+    is the key the HSM generated; no other party can produce that signature.
+    """
+    csr = _csr(hsm_did["did"])
+    assert csr.is_signature_valid
+    assert (
+        csr.public_key().public_numbers() == _public_key(hsm_did["did"]).public_numbers()
     )
-    assert all(len(s) == 64 for s in sigs)
-    # Verify each: signatures must round-trip against the same pubkey.
-    from cryptography.hazmat.primitives.asymmetric import ec, utils
-    from cryptography.hazmat.primitives import hashes
+    assert (
+        csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        == (SUBJECT["cn"])
+    )
 
-    from kmslite.v1_0.x509 import verkey_to_public_key
 
-    verkey = await signer.get_public_key(key_ref, P256)
-    pubkey = verkey_to_public_key(verkey, P256)
-    for payload, raw in zip(payloads, sigs):
-        r = int.from_bytes(raw[:32], "big")
-        s = int.from_bytes(raw[32:], "big")
-        pubkey.verify(utils.encode_dss_signature(r, s), payload, ec.ECDSA(hashes.SHA256()))
+def test_software_did_still_signs_in_wallet():
+    """The other half of delegation: no signer marker, so Askar must sign."""
+    created = post(
+        ALICE,
+        "/wallet/did/create",
+        json={"method": "key", "options": {"key_type": "p256"}},
+    )
+    assert created.ok, created.content
+    result = created.json()["result"]
+    assert "signer" not in (result.get("metadata") or {})
+
+    csr = _csr(result["did"])
+    assert csr.is_signature_valid
+    assert (
+        csr.public_key().public_numbers() == _public_key(result["did"]).public_numbers()
+    )
+
+
+def test_routes_are_mounted_but_unavailable_when_unconfigured():
+    """bob loads the plugin without signer config: mounted, but 503."""
+    assert _create_did(agent=BOB).status_code == 503

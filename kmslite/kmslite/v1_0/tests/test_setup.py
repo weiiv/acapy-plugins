@@ -1,6 +1,6 @@
 """Tests for kmslite plugin setup() wiring (env-based config)."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,13 +26,7 @@ def _clean_env(monkeypatch):
 
 
 def _make_context() -> InjectionContext:
-    from acapy_agent.admin.base_server import BaseAdminServer
-
-    ctx = InjectionContext(settings={})
-    admin = MagicMock(spec=BaseAdminServer)
-    admin.app = MagicMock()
-    ctx.injector.bind_instance(BaseAdminServer, admin)
-    return ctx
+    return InjectionContext(settings={})
 
 
 def _configure_pkcs11_env(monkeypatch):
@@ -47,14 +41,12 @@ def _configure_pkcs11_env(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_setup_without_env_config_binds_registry_but_no_signer():
-    """No kmslite env vars → SignerRegistry created, empty; routes still registered."""
+    """No kmslite env vars → SignerRegistry created and bound, but empty."""
     ctx = _make_context()
-    with patch("kmslite.v1_0.routes.register", new=AsyncMock()) as reg:
-        await setup(ctx)
+    await setup(ctx)
 
     registry = ctx.inject(SignerRegistry)
     assert registry.names() == []
-    reg.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -63,13 +55,12 @@ async def test_setup_registers_pkcs11_signer_when_configured_via_env(monkeypatch
     _configure_pkcs11_env(monkeypatch)
     ctx = _make_context()
 
-    with (
-        patch("kmslite.v1_0.signers.pkcs11.pkcs11") as pkcs11_mod,
-        patch("kmslite.v1_0.routes.register", new=AsyncMock()),
-    ):
-        pkcs11_mod.lib.return_value.get_token.return_value.open.side_effect = [
-            MagicMock() for _ in range(2)
-        ]
+    with patch("kmslite.v1_0.signers.pkcs11.pkcs11") as pkcs11_mod:
+        token = MagicMock()
+        token.label = "test"
+        token.slot.slot_id = 0
+        token.open.side_effect = [MagicMock() for _ in range(2)]
+        pkcs11_mod.lib.return_value.get_tokens.return_value = iter([token])
         await setup(ctx)
 
     registry = ctx.inject(SignerRegistry)
@@ -84,8 +75,7 @@ async def test_setup_unknown_protocol_logs_but_does_not_raise(monkeypatch, caplo
     monkeypatch.setenv("KMSLITE_PROTOCOL", "ridicu-lous")
     ctx = _make_context()
 
-    with patch("kmslite.v1_0.routes.register", new=AsyncMock()):
-        await setup(ctx)
+    await setup(ctx)
 
     registry = ctx.inject(SignerRegistry)
     assert registry.names() == []
@@ -107,8 +97,7 @@ async def test_setup_missing_pin_logged(monkeypatch, caplog):
     # PIN not set.
     ctx = _make_context()
 
-    with patch("kmslite.v1_0.routes.register", new=AsyncMock()):
-        await setup(ctx)
+    await setup(ctx)
 
     registry = ctx.inject(SignerRegistry)
     assert registry.names() == []

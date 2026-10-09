@@ -15,7 +15,7 @@ Design properties:
 - **Narrow privilege** — the plugin only sees sign requests for keys it explicitly registered. Software keys, DID records, and sign dispatch remain owned by the wallet.
 - **Opt-in for operators** — with no KMS configuration the plugin only exposes X.509 routes. External-signer routing activates only when a backend is configured and a request creates a DID under that provider.
 
-> **Requires ACA-Py core support.** This design depends on the `SignerRegistry` registry and making `BaseWallet.sign_message` a concrete (non-abstract) method. See [Core Changes Required](#core-changes-required) below.
+> **Requires ACA-Py core support.** This design depends on the `SignerRegistry` registry and on `BaseWallet._get_external_signature`, a concrete dispatch helper each wallet's `sign_message` calls first. See [Core Changes Required](#core-changes-required) below.
 
 ---
 
@@ -44,7 +44,7 @@ graph LR
 
 > **Ownership:** 🟢 ACA-Py core · 🔵 `kmslite` plugin · 🔴 external backend.
 
-> **How dispatch works.** At DID creation, the plugin (1) imports a **public-only Askar key** for the verkey via `session.handle.insert_key(verkey, Key.from_public_bytes(...))` and (2) builds a `DIDInfo` whose `metadata` carries `signer` and `key_ref`, then persists it via the wallet's existing `store_did(did_info)`. No private key material is written to Askar. On every `sign_message(message, from_verkey)` call, the base wallet resolves the DID via `get_local_did_for_verkey(from_verkey)`, reads `metadata.signer`, and if set, dispatches through `SignerRegistry`; otherwise it falls through to the subclass's in-wallet signing path. The wallet owns dispatch — no wrapper, no monkey-patching. See [Key Creation](#key-creation) and [Signing Flow](#signing-flow) below for the step-by-step call sequences.
+> **How dispatch works.** At DID creation, the plugin (1) imports a **public-only Askar key** for the verkey via `session.handle.insert_key(verkey, Key.from_public_bytes(...))` and (2) builds a `DIDInfo` whose `metadata` carries `signer` and `key_ref`, then persists it via the wallet's existing `store_did(did_info)`. No private key material is written to Askar. On every `sign_message(message, from_verkey)` call, the wallet first consults the inherited `_get_external_signature(...)` helper, which resolves the DID via `get_local_did_for_verkey(from_verkey)`, reads `metadata.signer`, and if set, dispatches through `SignerRegistry`; a `None` result means the wallet proceeds down its existing in-wallet signing path. The wallet owns dispatch — no wrapper, no monkey-patching. See [Key Creation](#key-creation) and [Signing Flow](#signing-flow) below for the step-by-step call sequences.
 
 ---
 
@@ -336,7 +336,7 @@ export KMSLITE_PKCS11_SLOT="0"                # optional
 | PIN (direct) | — | `KMSLITE_PKCS11_PIN` | The actual PIN. Used as fallback if `pin_env` isn't set. |
 | PIN (indirect) | `kmslite.pkcs11.pin_env` | — | Names an env var that holds the PIN (keeps the PIN out of the config file). |
 | Pool size | `kmslite.pkcs11.pool_size` | `KMSLITE_PKCS11_POOL_SIZE` | Authenticated PKCS#11 sessions kept in the pool; bounds HSM concurrency. Default `4`. |
-| Slot ID | `kmslite.pkcs11.slot` | `KMSLITE_PKCS11_SLOT` | Optional; ignored today (token is looked up by label). |
+| Slot ID | `kmslite.pkcs11.slot` | `KMSLITE_PKCS11_SLOT` | Optional. The token is looked up by `token_name`; when `slot` is set it additionally narrows the match to that slot, which disambiguates tokens sharing a label (e.g. Luna HA members). |
 
 **Precedence**: plugin-config value wins if set, otherwise the env var, otherwise a default (or an error for required fields).
 
@@ -388,7 +388,7 @@ Per-backend algorithm availability is determined by the configured signer. Each 
 The plugin depends on two small additions to ACA-Py core:
 
 1. **`SignerRegistry`** — a root-context-bound registry of named signer implementations.
-2. **`BaseWallet.sign_message` becomes concrete** — currently `@abstractmethod`; this change provides a base implementation that dispatches to a registered `Signer` when the DID's metadata says so. Subclasses keep their existing `sign_message` and call `super()` first; if it returns a signature, they return it, otherwise they fall through to their normal in-wallet path.
+2. **`BaseWallet._get_external_signature`** — a concrete helper on `BaseWallet` that dispatches to a registered `Signer` when the DID's metadata says so. `sign_message` stays `@abstractmethod` with its existing `-> bytes` signature; each subclass calls the helper first and falls through to its normal in-wallet path when the helper returns `None`.
 
 No new wallet method is introduced. DID creation for external-signer keys uses two existing primitives back-to-back: `session.handle.insert_key(verkey, Key.from_public_bytes(...), metadata=...)` imports a public-only Askar key entry, and `BaseWallet.store_did(did_info)` persists the DID record with the `signer` / `key_ref` marker in `metadata`.
 
@@ -396,41 +396,51 @@ No new wallet method is introduced. DID creation for external-signer keys uses t
 
 ```python
 # acapy_agent/wallet/signer_registry.py
+@runtime_checkable
 class Signer(Protocol):
-    async def sign(self, key_ref, message, key_type) -> bytes: ...
+    async def sign(self, key_ref: str, message: Union[List[bytes], bytes], key_type: KeyType) -> bytes: ...
 
 class SignerRegistry:
-    def register(self, name: str, signer: Signer) -> None: ...
+    def register(self, name: str, signer: Signer) -> None: ...   # ValueError on duplicate name
     def get(self, name: str) -> Signer | None: ...
+    def names(self) -> List[str]: ...
 ```
 
-### `BaseWallet.sign_message`
+### `BaseWallet._get_external_signature`
 
-`sign_message` becomes a concrete method on `BaseWallet` (no longer `@abstractmethod`) and its return type widens to `Optional[bytes]`: a real signature if the verkey's DID is marked as signer-held, or `None` to mean "not handled here, subclass falls through." Explicit `None` avoids relying on a magic zero-length-signature sentinel and keeps the contract clear for any future algorithm.
+Dispatch lives in a new concrete helper rather than in `sign_message` itself, so the abstract `sign_message(message, from_verkey) -> bytes` contract is untouched. The helper returns a real signature if the verkey's DID is marked as signer-held, or `None` to mean "not handled here, sign in-wallet." Explicit `None` avoids relying on a magic zero-length-signature sentinel and keeps the contract clear for any future algorithm.
 
 ```python
 # acapy_agent/wallet/base.py
 class BaseWallet(ABC):
-    async def sign_message(self, message, from_verkey) -> Optional[bytes]:
+    async def _get_external_signature(self, message, from_verkey) -> Optional[bytes]:
         # 1. Look up the DID record by verkey (uses each wallet's existing primitive).
-        did_info = await self.get_local_did_for_verkey(from_verkey)
+        try:
+            did_info = await self.get_local_did_for_verkey(from_verkey)
+        except Exception:
+            # A key with no DID record has no external signer.
+            return None
 
-        # 2. No external-signer marker → tell the subclass to handle it.
-        signer_name = did_info.metadata.get("signer")
+        # 2. No external-signer marker → the subclass signs in-wallet.
+        signer_name = (did_info.metadata or {}).get("signer")
         if not signer_name:
             return None
 
         # 3. Resolve the registered signer and dispatch.
-        registry = self._context.inject(SignerRegistry)
-        signer = registry.get(signer_name)
+        session = getattr(self, "session", None)
+        registry = session.inject_or(SignerRegistry) if session else None
+        signer = registry.get(signer_name) if registry else None
         if signer is None:
-            raise WalletError(f"No signer registered as {signer_name!r}")
+            raise WalletError(f"DID {did_info.did} requires signer {signer_name}; ...")
 
-        key_ref = did_info.metadata["key_ref"]
+        key_ref = (did_info.metadata or {}).get("key_ref")
+        if not key_ref:
+            raise WalletError(f"DID {did_info.did} requires signer {signer_name} "
+                              "but metadata is missing key_ref")
         return await signer.sign(key_ref, message, did_info.key_type)
 ```
 
-This method is concrete and shared across all wallets. It reads through the existing `get_local_did_for_verkey` primitive (which resolves DIDs from the `CATEGORY_DID` record store via the `verkey` tag — no key-store lookup); the marker lives in `DIDInfo.metadata` (see [DID Records & Metadata](#did-records--metadata)).
+This helper is concrete and shared across all wallets. It reads through the existing `get_local_did_for_verkey` primitive (which resolves DIDs from the `CATEGORY_DID` record store via the `verkey` tag — no key-store lookup); the marker lives in `DIDInfo.metadata` (see [DID Records & Metadata](#did-records--metadata)). A DID marked `signer` whose provider is unregistered, or whose metadata lacks `key_ref`, is a hard `WalletError` — never a silent fall-through to in-wallet signing, which would fail anyway since no private material exists.
 
 > **Verified against `acapy-agent` 1.6.0.** Both `AskarWallet.store_did` and `KanonWallet.store_did` write only to the DID record store; they neither read nor write the Askar key store. Askar's own `Key.from_public_bytes(KeyAlg.P256, sec1_compressed_bytes)` accepts a public-key-only import, and `session.handle.insert_key(verkey, public_key, metadata=...)` persists it as a public-only entry. Combining the two — `insert_key` with the imported public key, then `store_did` with the marker metadata — uses only existing wallet primitives; no new API is introduced.
 
@@ -443,15 +453,14 @@ The two supported `wallet-type`s — `askar-anoncreds` (`AskarWallet`) and `kano
 ```python
 # acapy_agent/wallet/askar.py and kanon_wallet.py
 async def sign_message(self, message, from_verkey) -> bytes:
-    sig = await super().sign_message(message, from_verkey)
-    if sig is not None:
+    if (sig := await self._get_external_signature(message, from_verkey)) is not None:
         return sig
     # ... existing implementation unchanged ...
 ```
 
 That is the entire per-wallet change.
 
-**Footprint:** new wallets cost two lines (the `super()` call) to gain external-signer support; new backends cost zero core changes — they ship as plugins that register a signer with `SignerRegistry` at startup. See [Appendix B](#appendix-b--design-comparison-alternatives) for comparison with alternative designs.
+**Footprint:** new wallets cost two lines (the `_get_external_signature` call) to gain external-signer support; new backends cost zero core changes — they ship as plugins that register a signer with `SignerRegistry` at startup. See [Appendix B](#appendix-b--design-comparison-alternatives) for comparison with alternative designs.
 
 ---
 
@@ -461,13 +470,15 @@ The plugin ships PKCS#11 as the reference and only backend today — it covers a
 
 ```
 kmslite/v1_0/
-├── __init__.py              # setup(): build signer, register in SignerRegistry, install routes
+├── __init__.py              # setup(): build signer, register in SignerRegistry
+├── config.py                # KmsLiteConfig — plugin-config + env resolution
 ├── signers/
-│   ├── base.py              # implements core's Signer Protocol
 │   └── pkcs11.py            # PKCS11Signer — the implemented backend
 ├── routes.py                # /kmslite/did/* and /kmslite/did/{did}/{public-key,csr,certificate}
 └── x509.py                  # CSR build + cert validation helpers
 ```
+
+Signers are structurally typed against core's `Signer` Protocol — there is no plugin-side base class, so a new backend is one self-contained module.
 
 ### 1. PKCS#11 signer
 
@@ -475,7 +486,7 @@ One class implementing the core `Signer` Protocol, backed by `python-pkcs11`. P-
 
 | Method | Responsibility |
 |---|---|
-| `from_config(cfg)` | Read `library_path`, `slot`, `token_name`, `pin_env`, `pool_size`; open the library and build the session pool (see [Session pool](#session-pool) below). |
+| `from_config(cfg)` | Read `library_path`, `slot`, `token_name`, `pin_env`, `pool_size`; open the library, resolve the token by label (narrowed to `slot` when set), and build the session pool (see [Session pool](#session-pool) below). |
 | `generate_keypair(key_ref, key_type) → str` | Acquire a session from the pool, `session.generate_keypair(KeyType.EC, mechanism=EC_KEY_PAIR_GEN, …)` with non-extractable / sensitive template; read the resulting public EC point, convert to **SEC1-compressed form (33 bytes for P-256, `0x02`/`0x03` prefix)**, and return `bytes_to_b58(...)`. Format matches `aries_askar.Key.get_public_bytes()` → `bytes_to_b58` so the returned string drops straight into `DIDInfo.verkey`. |
 | `get_public_key(key_ref) → str` | Acquire a session from the pool, re-read the public key for an existing label, and return it as base58(SEC1-compressed) — same encoding as `generate_keypair`. Used by the `/public-key` route (which wraps it in a PEM `SubjectPublicKeyInfo`). |
 | `sign(key_ref, message, key_type) → bytes` | Acquire a session from the pool, SHA-256 the message, sign with `Mechanism.ECDSA`, return **raw `r‖s`** (64 bytes for P-256). Format matches `AskarWallet.sign_message` so `sign_message` output is uniform across software- and HSM-backed keys. Consumers that need DER (X.509) convert at the boundary — see [X.509 helpers](#4-x509-helpers). |
@@ -557,7 +568,7 @@ Adding Ed25519 / P-384 is a per-mechanism table addition in this file plus a one
 
 ### 2. Plugin setup
 
-A single `setup(context)` picks the signer class for the configured `protocol`, instantiates it, registers it in `SignerRegistry` under the configured `provider` name, and installs the HTTP routes:
+A single `setup(context)` picks the signer class for the configured `protocol`, instantiates it, and registers it in `SignerRegistry` under the configured `provider` name:
 
 ```python
 # kmslite/v1_0/__init__.py
@@ -571,11 +582,11 @@ async def setup(context: InjectionContext) -> None:
         SignerCls = PROTOCOL_IMPLEMENTATIONS[cfg["protocol"]]
         signer = SignerCls.from_config(cfg[cfg["protocol"]])
         context.inject(SignerRegistry).register(cfg["provider"], signer)
-    # Routes are always installed (X.509 endpoints work for any DID).
-    await routes.register(context)
 ```
 
-If `kmslite` is absent from config, no signer is registered — the plugin still loads, only the X.509 routes are exposed, and no DIDs gain external-signer dispatch.
+The routes are mounted separately: ACA-Py's plugin registry awaits `kmslite.v1_0.routes.register(app)` once the admin server exists, so the X.509 endpoints work for any DID whether or not a signer was configured.
+
+If `kmslite` is absent from config, no signer is registered — the plugin still loads, only the X.509 routes are usable, and no DIDs gain external-signer dispatch.
 
 ### 3. Routes
 
@@ -615,7 +626,7 @@ async def create_kms_did(request):
     return web.json_response(did_info.serialize())
 ```
 
-The `insert_key` step imports a public-only Askar key entry so that `fetch_key(verkey)` and `wallet.get_signing_key(verkey)` succeed uniformly for software- and HSM-backed DIDs (see [`BaseWallet.sign_message`](#basewalletsign_message)). The entry has no private material; every signing operation still routes through `SignerRegistry`.
+The `insert_key` step imports a public-only Askar key entry so that `fetch_key(verkey)` and `wallet.get_signing_key(verkey)` succeed uniformly for software- and HSM-backed DIDs (see [`BaseWallet._get_external_signature`](#basewallet_get_external_signature)). The entry has no private material; every signing operation still routes through `SignerRegistry`.
 
 > **Mirrored metadata is intentional.** The `{signer, key_ref}` marker is written to both the DID record (via `store_did`) and the key entry (via `insert_key(metadata=...)`). Dispatch reads only the DID record — but the mirror keeps parity with `AskarWallet.create_local_did`'s existing dual-write pattern, so `wallet.get_signing_key(verkey).metadata` returns the marker for external DIDs just as it does for software keys. The mirror is a write-once snapshot (subsequent DID-metadata updates via `replace_local_did_metadata` don't propagate to the key entry) — safe because `signer` and `key_ref` are immutable by design.
 
@@ -700,7 +711,7 @@ Helper functions in the same module: `build_csr(wallet, did_info, subject) → P
 
 | # | Decision | Rationale |
 |---|---|---|
-| 1 | External signer integration via core registry | Dispatch lives on `BaseWallet.sign_message` (made concrete); subclasses call `super()` first, preserving their existing method name and signature. DID creation reuses `session.handle.insert_key(...)` (public-only key entry) + the existing `store_did(did_info)` — no new wallet API. The plugin sees only its own keys; the wallet retains ownership of DID records and software-key dispatch. |
+| 1 | External signer integration via core registry | Dispatch lives in `BaseWallet._get_external_signature`, a concrete helper each subclass calls first; `sign_message` keeps its existing name, signature, and abstract status. DID creation reuses `session.handle.insert_key(...)` (public-only key entry) + the existing `store_did(did_info)` — no new wallet API. The plugin sees only its own keys; the wallet retains ownership of DID records and software-key dispatch. |
 | 2 | Non-extractable backend keys | PKCS#11 keys are created with `CKA_SENSITIVE=true` and `CKA_EXTRACTABLE=false` so they can never leave the token. No API path exposes private-key material. |
 | 3 | Provider / protocol split | `provider` (backend identity) is persisted into DID metadata as `signer`; `protocol` (transport) is deploy-time-only. Lets operators switch transports against the same backend without touching stored DIDs. |
 | 4 | `key_ref` as opaque identifier | Plugin-defined string (today: PKCS#11 `CKA_LABEL`); wallet and core treat it as opaque. |
@@ -719,42 +730,34 @@ How each credential format reaches the wallet (and therefore the HSM, when confi
 |---|---|---|
 | JWT VC (`jwt_vc_json`) | `jwt_sign()` → `wallet.sign_message()` | Yes |
 | SD-JWT VC (`sd_jwt_vc`) | `jwt_sign()` → `wallet.sign_message()` | Yes |
-| mDOC / mDL (`mso_mdoc`) | `MdocSigningKeyRecord.private_key_pem` → Rust FFI | **No** |
+| mDOC / mDL (`mso_mdoc`) | `PreparedMdoc.signature_payload()` → `wallet.sign_message()` → `.complete(cert, sig)` | Yes — **follow-on PR** |
 
-JWT- and SD-JWT-based formats already flow through `BaseWallet.sign_message()`, so the base-class dispatch picks them up automatically. mDOC is the outlier and is addressed below.
+JWT and SD-JWT already funnel through `BaseWallet.sign_message()`, so external-signer dispatch picks them up with no per-format work. mDOC joins them once the follow-on PR lands.
 
-#### mDOC Gap
+#### mDOC — follow-on PR
 
-**Why mDOC is the outlier:** the current mDOC library exposes a **one-step** signing API that takes the raw private key as input. To use it, the plugin has to hold the key in cleartext, which defeats HSM protection. The fix is to switch to the **two-step** `PreparedMdoc` API (already on `isomdl-uniffi` main, owned by Indicio), which splits *building the signature payload* from *applying the signature* — letting the wallet sign in between.
+mDOC is the last format to get there, and the change ships separately from this one. The library's original one-step API takes the raw private key as input, which means holding it in cleartext and defeating HSM protection. The follow-on PR moves `mso_mdoc` to `isomdl-uniffi`'s **two-step `PreparedMdoc` API**, which splits *building the signature payload* from *applying the signature* — so the wallet signs in between and no private key crosses the FFI boundary.
+
+The two plugins meet at the DID record: `mso_mdoc` resolves its issuer key from `DIDInfo` — the verkey to sign with, and the `x509_certificate_pem` that kmslite bound via `POST /kmslite/did/{did}/certificate` to embed in the MSO. Nothing in kmslite changes for it.
 
 ```mermaid
 sequenceDiagram
-    participant P as mDOC plugin
-    participant W as kmslite
+    participant P as mso_mdoc plugin
+    participant W as BaseWallet
     participant H as HSM / Inner Wallet
-    participant M as Mdoc lib
+    participant M as isomdl-uniffi
 
-    rect rgb(255, 235, 235)
-        Note over P,M: 🔴 One-step (current) — key leaves the wallet
-        P->>P: load MdocSigningKeyRecord<br/>(cleartext private key)
-        P->>M: Mdoc.create_and_sign(private_key_pem, ...)
-        M-->>P: signed mDOC
-    end
-
-    rect rgb(235, 255, 235)
-        Note over P,M: 🟢 Two-step (target) — key stays in HSM
-        P->>P: load DIDInfo<br/>(verkey + cert PEM, no private key)
-        P->>M: PreparedMdoc.new(...)
-        M-->>P: prepared
-        P->>M: prepared.signature_payload()
-        M-->>P: payload bytes
-        P->>W: sign_message(payload, verkey)
-        W->>H: sign (PKCS#11 / Askar)
-        H-->>W: signature
-        W-->>P: signature
-        P->>M: prepared.complete(cert_pem, signature)
-        M-->>P: signed mDOC
-    end
+    P->>P: load DIDInfo<br/>(verkey + cert PEM, no private key)
+    P->>M: PreparedMdoc(...)
+    M-->>P: prepared
+    P->>M: prepared.signature_payload()
+    M-->>P: TBS bytes
+    P->>W: sign_message(tbs, verkey)
+    W->>H: sign (PKCS#11 via SignerRegistry, or Askar)
+    H-->>W: raw r‖s
+    W-->>P: signature
+    P->>M: prepared.complete(cert_pem, signature)
+    M-->>P: signed mDOC
 ```
 
 ---
@@ -818,4 +821,4 @@ graph TB
 |---|---|---|---|
 | **Where the work lives** | ACA-Py core (small, opt-in) + plugin (signer + setup) | Plugin only (monkey-patches `_setup`) | ACA-Py core (both wallets + routes) |
 | **Pros** | <ul><li>Narrow privilege — plugin only sees its own keys</li><li>Dispatch in one place (`BaseWallet`)</li><li>Same pattern extends to additional protocols when needed</li></ul> | <ul><li>Ships entirely in the plugin</li><li>No core PR</li></ul> | <ul><li>One repo, one release</li><li>No plugin machinery</li></ul> |
-| **Cons** | <ul><li>Requires an upstream PR</li><li>Every wallet wanting external signers must add a `super()` call</li></ul> | <ul><li>Plugin sees every wallet call (broad privilege)</li><li>Brittle coupling to private internals</li><li>Multiple wrapper plugins collide</li></ul> | <ul><li>Maintainers won't accept backend code in core</li><li>Locks you to ACA-Py's release cadence</li><li>Every new backend re-opens core</li></ul> |
+| **Cons** | <ul><li>Requires an upstream PR</li><li>Every wallet wanting external signers must add a `_get_external_signature` call</li></ul> | <ul><li>Plugin sees every wallet call (broad privilege)</li><li>Brittle coupling to private internals</li><li>Multiple wrapper plugins collide</li></ul> | <ul><li>Maintainers won't accept backend code in core</li><li>Locks you to ACA-Py's release cadence</li><li>Every new backend re-opens core</li></ul> |

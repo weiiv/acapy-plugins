@@ -1,6 +1,6 @@
 # BouncyHsm server for kmslite local development.
 #
-# Usage:
+# Usage (from this directory):
 #   docker compose -f docker-compose.bouncyhsm.yml up -d
 #   docker compose -f docker-compose.bouncyhsm.yml down
 #
@@ -10,16 +10,15 @@
 #
 # The plugin itself (kmslite + ACA-Py + tests) runs natively on macOS in
 # the host Python environment — nothing in this compose file cares about
-# the client side. See ./BOUNCYHSM.md for the client-lib build + config.
+# the client side. See ../BOUNCYHSM.md for the client-lib build + config.
 
 services:
   bouncyhsm:
     build:
-      context: ./bouncyhsm-server
+      context: ../server
       args:
         BOUNCYHSM_VERSION: "2.3.0"
     image: kmslite/bouncyhsm:2.3.0
-    container_name: kmslite-bouncyhsm
     ports:
       - "8080:8080"
       - "8765:8765"

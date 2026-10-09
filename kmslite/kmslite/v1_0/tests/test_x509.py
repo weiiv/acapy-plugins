@@ -152,9 +152,7 @@ def test_build_csr_end_to_end():
         assert csr.subject.rfc4514_string() == "CN=issuer.example.com,C=CA"
         # Public key in the CSR must equal the verkey's public key.
         expected = verkey_to_public_key(verkey, P256)
-        assert (
-            csr.public_key().public_numbers() == expected.public_numbers()
-        )
+        assert csr.public_key().public_numbers() == expected.public_numbers()
 
     asyncio.run(_run())
 
@@ -195,9 +193,7 @@ def _self_sign_cert(askar_key, cn: str) -> bytes:
             .not_valid_after(__import__("datetime").datetime(2030, 1, 1))
         )
         # sign the cert via adapter (off-loop because .sign() is sync)
-        signed = await asyncio.to_thread(
-            cert.sign, adapter, hashes.SHA256()
-        )
+        signed = await asyncio.to_thread(cert.sign, adapter, hashes.SHA256())
         return signed.public_bytes(serialization.Encoding.PEM)
 
     return asyncio.run(_run())
@@ -206,9 +202,7 @@ def _self_sign_cert(askar_key, cn: str) -> bytes:
 def test_assert_cert_matches_verkey_accepts_matching_cert():
     _verkey, askar_key = _p256_verkey_and_askar_key()
     pem = _self_sign_cert(askar_key, "issuer.example.com")
-    assert_cert_matches_verkey(
-        pem, bytes_to_b58(askar_key.get_public_bytes()), P256
-    )
+    assert_cert_matches_verkey(pem, bytes_to_b58(askar_key.get_public_bytes()), P256)
 
 
 def test_assert_cert_matches_verkey_rejects_wrong_verkey():

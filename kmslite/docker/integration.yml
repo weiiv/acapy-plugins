@@ -12,9 +12,15 @@ endpoint:
 plugin:
   - kmslite.v1_0
 
-genesis-url: http://test.bcovrin.vonx.io/genesis
+no-ledger: true
 
 log-level: info
 
 auto-accept-invites: true
 auto-respond-messages: true
+
+# Wallet
+auto-provision: true
+wallet-type: askar
+wallet-name: kmslite-wallet
+wallet-key: insecure

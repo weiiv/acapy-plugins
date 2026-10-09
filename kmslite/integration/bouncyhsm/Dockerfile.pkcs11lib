@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+# Publishes the BouncyHsm PKCS#11 client library and provisions the test token.
+#
+# Upstream ships no prebuilt Linux client library, so it is compiled here and
+# handed to the ACA-Py container over a shared volume; that keeps the clang
+# toolchain out of the plugin image.
+
+ARG BOUNCYHSM_VERSION=2.3.0
+
+FROM debian:bookworm-slim AS build
+ARG BOUNCYHSM_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates git clang make binutils \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN git clone --depth 1 --branch "v${BOUNCYHSM_VERSION}" \
+        https://github.com/harrison314/BouncyHsm.git .
+# ARCH_FLAGS cleared: upstream hardcodes -m64, which aarch64 clang rejects.
+RUN cd build_linux \
+    && BOUNCYOSENVIROMENT=rehl_like \
+       make build ARCH_FLAGS= LIBNAME=BouncyHsm.Pkcs11Lib.so
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /build/build_linux/BouncyHsm.Pkcs11Lib.so /opt/bouncyhsm/
+COPY hsm-init.sh /usr/local/bin/hsm-init
+RUN chmod +x /usr/local/bin/hsm-init
+
+ENTRYPOINT ["/usr/local/bin/hsm-init"]

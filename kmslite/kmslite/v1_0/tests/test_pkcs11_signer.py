@@ -25,13 +25,21 @@ from kmslite.v1_0.signers.pkcs11 import (
 # ------------------------------------------------------------------ helpers
 
 
+def _mock_token(label: str = "test-token", slot_id: int = 0) -> MagicMock:
+    """A token mock shaped like pkcs11.types.Token (label + slot.slot_id)."""
+    token = MagicMock()
+    token.label = label
+    token.slot.slot_id = slot_id
+    return token
+
+
 def _make_signer(pool_size: int = 2) -> PKCS11Signer:
     """Build a PKCS11Signer with mocked pkcs11 library + sessions."""
     with patch("kmslite.v1_0.signers.pkcs11.pkcs11") as pkcs11_mod:
         mock_lib = MagicMock()
-        mock_token = MagicMock()
+        mock_token = _mock_token()
         pkcs11_mod.lib.return_value = mock_lib
-        mock_lib.get_token.return_value = mock_token
+        mock_lib.get_tokens.return_value = iter([mock_token])
         # Each `open` returns a fresh session mock; the signer will hold
         # pool_size of them in its queue.
         mock_token.open.side_effect = [MagicMock() for _ in range(pool_size)]
@@ -60,9 +68,7 @@ def _real_p256_uncompressed_point() -> bytes:
     # Uncompress by round-tripping via cryptography.
     from cryptography.hazmat.primitives.asymmetric import ec
 
-    pub = ec.EllipticCurvePublicKey.from_encoded_point(
-        ec.SECP256R1(), compressed
-    )
+    pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), compressed)
     numbers = pub.public_numbers()
     coord_len = 32
     return (
@@ -140,9 +146,9 @@ def test_from_config_uses_resolved_pin(monkeypatch):
     # with `pin` set. This matches what `KmsLiteConfig._resolve_pkcs11`
     # produces.
     with patch("kmslite.v1_0.signers.pkcs11.pkcs11") as pkcs11_mod:
-        pkcs11_mod.lib.return_value.get_token.return_value.open.side_effect = [
-            MagicMock() for _ in range(4)
-        ]
+        token = _mock_token(label="t")
+        token.open.side_effect = [MagicMock() for _ in range(4)]
+        pkcs11_mod.lib.return_value.get_tokens.return_value = iter([token])
         signer = PKCS11Signer.from_config(
             {
                 "library_path": "/x",
@@ -156,6 +162,50 @@ def test_from_config_uses_resolved_pin(monkeypatch):
 def test_from_config_rejects_missing_required_key():
     with pytest.raises(ValueError, match="missing required key"):
         PKCS11Signer.from_config({"library_path": "/x"})
+
+
+def test_init_slot_filters_tokens_sharing_a_label():
+    tokens = [_mock_token("shared", slot_id=1), _mock_token("shared", slot_id=3)]
+    with patch("kmslite.v1_0.signers.pkcs11.pkcs11") as pkcs11_mod:
+        mock_lib = pkcs11_mod.lib.return_value
+        mock_lib.get_tokens.return_value = iter(tokens)
+        signer = PKCS11Signer(
+            lib_path="/fake/lib.so",
+            token_label="shared",
+            pin="1234",
+            slot=3,
+            pool_size=1,
+        )
+    assert signer._token is tokens[1]
+    mock_lib.get_tokens.assert_called_once_with(token_label="shared")
+
+
+@pytest.mark.parametrize(
+    ("matched", "expected"),
+    [
+        ([], "matched 0 tokens"),
+        ([_mock_token("shared", 1), _mock_token("shared", 3)], "matched 2 tokens"),
+    ],
+)
+def test_init_without_exactly_one_match_lists_visible_tokens(matched, expected):
+    visible = MagicMock()
+    visible.slot_id = 2
+    visible.get_token.return_value.label = "kmslite-dev"
+    with patch("kmslite.v1_0.signers.pkcs11.pkcs11") as pkcs11_mod:
+        mock_lib = pkcs11_mod.lib.return_value
+        mock_lib.get_tokens.return_value = iter(matched)
+        mock_lib.get_slots.return_value = [visible]
+        with pytest.raises(WalletError) as err:
+            PKCS11Signer(
+                lib_path="/fake/lib.so",
+                token_label="ABC_Issuer_002",
+                pin="1234",
+                pool_size=1,
+            )
+    message = str(err.value)
+    assert expected in message
+    assert "ABC_Issuer_002" in message
+    assert "slot 2: 'kmslite-dev'" in message
 
 
 # ------------------------------------------------------------------ Signer API
@@ -193,9 +243,7 @@ async def test_generate_keypair_returns_session_to_pool_on_error():
     original_size = signer._pool.qsize()
     with (
         patch.object(signer, "_assert_key_ref_free_sync", return_value=None),
-        patch.object(
-            signer, "_create_keypair_sync", side_effect=RuntimeError("boom")
-        ),
+        patch.object(signer, "_create_keypair_sync", side_effect=RuntimeError("boom")),
     ):
         with pytest.raises(RuntimeError):
             await signer.generate_keypair("k", P256)
@@ -219,9 +267,7 @@ async def test_generate_keypair_rejects_duplicate_label():
 async def test_sign_returns_signature_bytes_and_hashes_message():
     signer = _make_signer(pool_size=1)
     fake_sig = b"\x11" * 64
-    with patch.object(
-        signer, "_sign_digest_sync", return_value=fake_sig
-    ) as sign_mock:
+    with patch.object(signer, "_sign_digest_sync", return_value=fake_sig) as sign_mock:
         result = await signer.sign("k", b"hello", P256)
 
     assert result == fake_sig
@@ -239,6 +285,13 @@ async def test_sign_rejects_unsupported_key_type():
     signer = _make_signer(pool_size=1)
     with pytest.raises(WalletError, match="unsupported key_type"):
         await signer.sign("k", b"m", ED25519)
+
+
+@pytest.mark.asyncio
+async def test_sign_rejects_multi_message():
+    signer = _make_signer(pool_size=1)
+    with pytest.raises(WalletError, match="multi-message"):
+        await signer.sign("k", [b"a", b"b"], P256)
 
 
 @pytest.mark.asyncio

@@ -16,8 +16,10 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from acapy_agent.wallet.base import BaseWallet
+from acapy_agent.wallet.error import WalletError
 
 from kmslite.v1_0 import routes as kmslite_routes
+from kmslite.v1_0.signers import SignerError
 
 
 # --------------------------------------------------------------------- request builder
@@ -284,6 +286,63 @@ async def test_bind_certificate_rejects_spki_mismatch(context, fake_signer):
 
 
 @pytest.mark.asyncio
+async def test_create_did_502_when_signer_fails(context, fake_signer):
+    async def boom(key_ref, key_type):
+        raise SignerError("PKCS11 generate_keypair: CKR_DEVICE_ERROR")
+
+    fake_signer.generate_keypair = boom
+    body = {
+        "method": "web",
+        "key_type": "p256",
+        "options": {"did": "did:web:down.example.com", "key_ref": "d-01"},
+    }
+    with pytest.raises(web.HTTPBadGateway) as err:
+        await kmslite_routes.create_kms_did(_make_request(context, body))
+    # Backend detail stays in the log, not in the response.
+    assert "CKR_DEVICE_ERROR" not in err.value.reason
+
+
+@pytest.mark.asyncio
+async def test_create_did_400_when_caller_is_at_fault(context, fake_signer):
+    async def taken(key_ref, key_type):
+        raise WalletError(f"key_ref {key_ref!r} already exists on the token")
+
+    fake_signer.generate_keypair = taken
+    body = {
+        "method": "web",
+        "key_type": "p256",
+        "options": {"did": "did:web:dupe.example.com", "key_ref": "dupe"},
+    }
+    with pytest.raises(web.HTTPBadRequest) as err:
+        await kmslite_routes.create_kms_did(_make_request(context, body))
+    assert "already exists" in err.value.reason
+
+
+@pytest.mark.asyncio
+async def test_csr_502_when_signing_fails(context, fake_signer):
+    body = {
+        "method": "web",
+        "key_type": "p256",
+        "options": {"did": "did:web:csr-down.example.com", "key_ref": "c-01"},
+    }
+    await kmslite_routes.create_kms_did(_make_request(context, body))
+
+    async def boom(key_ref, message, key_type):
+        raise SignerError("PKCS11 sign: CKR_DEVICE_ERROR")
+
+    fake_signer.sign = boom
+    with pytest.raises(web.HTTPBadGateway) as err:
+        await kmslite_routes.create_kms_did_csr(
+            _make_request(
+                context,
+                body={"subject": {"cn": "issuer"}},
+                match_info={"did": "did:web:csr-down.example.com"},
+            )
+        )
+    assert "CKR_DEVICE_ERROR" not in err.value.reason
+
+
+@pytest.mark.asyncio
 async def test_get_certificate_404_when_not_bound(context, fake_signer):
     body = {
         "method": "web",
@@ -306,7 +365,8 @@ async def test_register_installs_five_routes():
     await kmslite_routes.register(app)
     # Filter kmslite routes (path prefix).
     kms_routes = [
-        r for r in app.router.routes()
+        r
+        for r in app.router.routes()
         if str(r.resource) and "/kmslite/did" in str(r.resource)
     ]
     assert len(kms_routes) == 5
