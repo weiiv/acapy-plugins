@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from acapy_agent.core.profile import Profile
 from acapy_agent.resolver.did_resolver import DIDResolver, DIDUrl
 from acapy_agent.wallet.base import BaseWallet
+from acapy_agent.wallet.error import WalletNotFoundError
 from acapy_agent.wallet.jwt import (
     BadJWSHeaderError,
     BaseVerificationKeyStrategy,
@@ -16,8 +17,8 @@ from acapy_agent.wallet.jwt import (
     nym_to_did,
 )
 from acapy_agent.wallet.jwt import b64_to_bytes, b64_to_dict
-from acapy_agent.wallet.key_type import ED25519, P256
-from acapy_agent.wallet.util import b58_to_bytes, bytes_to_b64
+from acapy_agent.wallet.key_type import ED25519, P256, KeyType
+from acapy_agent.wallet.util import b58_to_bytes, bytes_to_b58, bytes_to_b64
 from aries_askar import Key, KeyAlg
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
@@ -117,6 +118,20 @@ def key_from_x5c(x5c: List[str]) -> Key:
         raise ValueError(f"Unsupported public key type in x5c: {type(pub_key).__name__}")
 
 
+def _jws_alg(key_type: KeyType) -> str:
+    if key_type == ED25519:
+        return "EdDSA"
+    if key_type == P256:
+        return "ES256"
+    raise ValueError("Unable to determine JWT signing alg")
+
+
+def did_jwk_to_verkey(did: str) -> str:
+    """Return the base58 verkey of the public JWK encoded in a did:jwk."""
+    jwk = json.loads(b64_to_bytes(did[len("did:jwk:") :], urlsafe=True))
+    return bytes_to_b58(Key.from_jwk(jwk).get_public_bytes())
+
+
 async def jwt_sign(
     profile: Profile,
     headers: Dict[str, Any],
@@ -124,15 +139,19 @@ async def jwt_sign(
     did: Optional[str] = None,
     verification_method: Optional[str] = None,
     x5c_chain: Optional[List[str]] = None,
+    *,
+    verkey: Optional[str] = None,
 ) -> str:
-    """Create a signed JWT given headers, payload, and signing DID or DID URL.
+    """Create a signed JWT given headers, payload, and a signing key.
+
+    The key is *verkey* when given; otherwise it is resolved from *did* /
+    *verification_method*. Only the DID path adds a ``kid`` header.
 
     If *x5c_chain* is provided (or ``x5c`` is already present in *headers*)
-    the resulting JWT will carry an ``x5c`` header instead of ``kid``.  The
-    private key used for signing is still resolved from the wallet via
-    *did* / *verification_method* — the cert chain must correspond to that key.
+    the resulting JWT will carry an ``x5c`` header instead of ``kid``; the
+    cert chain must correspond to the signing key.
     """
-    if verification_method is None:
+    if verkey is None and verification_method is None:
         if did is None:
             raise ValueError("did or verificationMethod required.")
 
@@ -144,7 +163,7 @@ async def jwt_sign(
         )
         if not verification_method:
             raise ValueError("Could not determine verification method from DID")
-    else:
+    elif verkey is None:
         # We look up keys by did for now
         did = DIDUrl.parse(verification_method).did
         if not did:
@@ -159,24 +178,30 @@ async def jwt_sign(
     # x5c (RFC 7517 §4.7) and kid (RFC 7517 §4.5) are mutually exclusive.
     if x5c_chain:
         headers = {**headers, "x5c": x5c_chain}
-    elif "x5c" not in headers:
+    elif "x5c" not in headers and verkey is None:
         headers = {**headers, "kid": verification_method}
-    # else: caller already set x5c in headers — leave as-is, omit kid.
+    # else: x5c already in headers, or verkey path — no kid.
 
     async with profile.session() as session:
         wallet = session.inject(BaseWallet)
-        did_info = await wallet.get_local_did(did_lookup_name(did))
-
-        if did_info.key_type == ED25519:
-            headers["alg"] = "EdDSA"
-        elif did_info.key_type == P256:
-            headers["alg"] = "ES256"
+        if verkey is not None:
+            key_type = (await wallet.get_signing_key(verkey)).key_type
         else:
-            raise ValueError("Unable to determine JWT signing alg")
+            try:
+                did_info = await wallet.get_local_did(did_lookup_name(did))
+                verkey, key_type = did_info.verkey, did_info.key_type
+            except WalletNotFoundError:
+                if not did.startswith("did:jwk:"):
+                    raise
+                # did:jwk keys created through /wallet/keys have no DID record.
+                verkey = did_jwk_to_verkey(did)
+                key_type = (await wallet.get_signing_key(verkey)).key_type
+
+        headers["alg"] = _jws_alg(key_type)
 
         encoded_headers = dict_to_b64(headers)
         sig_bytes = await wallet.sign_message(
-            f"{encoded_headers}.{encoded_payload}".encode(), did_info.verkey
+            f"{encoded_headers}.{encoded_payload}".encode(), verkey
         )
 
     sig = bytes_to_b64(sig_bytes, urlsafe=True, pad=False)
