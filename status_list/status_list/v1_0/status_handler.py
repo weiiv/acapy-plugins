@@ -12,11 +12,12 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from acapy_agent.admin.request_context import AdminRequestContext
-from acapy_agent.core.profile import ProfileSession
+from acapy_agent.core.profile import Profile, ProfileSession
 from acapy_agent.storage.error import StorageNotFoundError
+from acapy_agent.wallet.keys.manager import multikey_to_verkey
 from acapy_agent.wallet.util import bytes_to_b64, unpad
 from bitarray import bitarray
 
@@ -426,12 +427,19 @@ async def get_status_list(
         unix_validUntil = int(validUntil.timestamp())
         ttl = 43200
 
+        if definition.signing_multikey:
+            issuer = definition.issuer_id
+        else:
+            issuer = definition.issuer_did
+
         payload = {
-            "iss": definition.issuer_did,
+            "iss": issuer,
             "nbf": unix_now,
             "jti": f"urn:uuid:{list_number}",
             "sub": public_uri,
         }
+        if definition.signing_multikey and not issuer:
+            del payload["iss"]  # Token Status List §5.1 does not require iss
 
         if definition.list_type == "ietf":
             status_list = {
@@ -454,7 +462,7 @@ async def get_status_list(
                         "VerifiableCredential",
                         "BitstringStatusListCredential",
                     ],
-                    "issuer": definition.issuer_did,
+                    "issuer": issuer,
                     "validFrom": now.isoformat(),
                     "validUntil": validUntil.isoformat(),
                     "credentialSubject": {
@@ -486,6 +494,60 @@ async def get_status_list(
         return status_list
 
 
+def _expires_at(status_list: dict) -> datetime:
+    """End of the status list's validity; now for a raw list, which has none."""
+    if "exp" in status_list:
+        return datetime.fromtimestamp(status_list["exp"], timezone.utc)
+    if "vc" in status_list:
+        return datetime.fromisoformat(status_list["vc"]["validUntil"])
+    return datetime.now(timezone.utc)
+
+
+async def _issuer_x5c(profile: Profile, multikey: str, expires_at: datetime) -> List[str]:
+    """x5c of the issuer certificate covering the status list's validity."""
+    # x509_certs ships with the oid4vc plugin; status_list does not depend on it.
+    try:
+        from x509_certs import X509Error, embedded_x5c, select_certificate
+    except ImportError as err:
+        raise StatusListError("signing_multikey requires the x509_certs plugin") from err
+
+    async with profile.session() as session:
+        try:
+            record = await select_certificate(
+                session, multikey, "sd_jwt_vc_issuer", expires_at
+            )
+        except X509Error as err:
+            raise StatusListError(str(err)) from err
+    return embedded_x5c(record)
+
+
+async def sign_status_list(
+    profile: Profile, definition: StatusListDef, status_list: dict, *, cwt: bool = False
+) -> str | bytes:
+    """Sign a status list as a JWT, or as a CWT when *cwt* is set.
+
+    With `signing_multikey` the token carries the issuer certificate chain;
+    otherwise it is signed with the definition's DID.
+    """
+    if definition.signing_multikey:
+        key = {
+            "verkey": multikey_to_verkey(definition.signing_multikey),
+            "x5c": await _issuer_x5c(
+                profile, definition.signing_multikey, _expires_at(status_list)
+            ),
+        }
+    else:
+        key = {
+            "did": definition.issuer_did,
+            "verification_method": definition.verification_method,
+        }
+
+    if cwt:
+        return await cwt_sign(profile, status_list, **key)
+    headers = {"typ": "statuslist+jwt"} if definition.list_type == "ietf" else {}
+    return await jwt_sign(profile, headers, status_list, **key)
+
+
 async def get_status_list_token(
     context: AdminRequestContext,
     list_number: str,
@@ -508,20 +570,5 @@ async def get_status_list_token(
 
     status_list = await get_status_list(context, definition, list_number)
 
-    if definition.list_type == "ietf" and accept and "statuslist+cwt" in accept:
-        return await cwt_sign(
-            profile=context.profile,
-            payload=status_list,
-            did=definition.issuer_did,
-            verification_method=definition.verification_method,
-        )
-
-    headers = {"typ": "statuslist+jwt"} if definition.list_type == "ietf" else {}
-
-    return await jwt_sign(
-        profile=context.profile,
-        headers=headers,
-        payload=status_list,
-        did=definition.issuer_did,
-        verification_method=definition.verification_method,
-    )
+    cwt = definition.list_type == "ietf" and bool(accept) and "statuslist+cwt" in accept
+    return await sign_status_list(context.profile, definition, status_list, cwt=cwt)

@@ -5,6 +5,7 @@ import string
 from typing import List, Optional
 
 from acapy_agent.messaging.models.base_record import BaseRecord, BaseRecordSchema
+from acapy_agent.messaging.valid import Uri
 from acapy_agent.wallet.util import b64_to_bytes, bytes_to_b64
 from bitarray import bitarray
 from bitarray import util as bitutil
@@ -46,6 +47,8 @@ class StatusListDef(BaseRecord):
         list_numbers: Optional[List[str]] = None,
         issuer_did: Optional[str] = None,
         verification_method: Optional[str] = None,
+        signing_multikey: Optional[str] = None,
+        issuer_id: Optional[str] = None,
         **kwargs,
     ) -> None:
         """Initialize a new status list definition instance."""
@@ -66,6 +69,8 @@ class StatusListDef(BaseRecord):
         self.list_numbers = list_numbers
         self.issuer_did = issuer_did
         self.verification_method = verification_method
+        self.signing_multikey = signing_multikey
+        self.issuer_id = issuer_id
 
         if not self.list_seed:
             self.seed_list()
@@ -92,7 +97,7 @@ class StatusListDef(BaseRecord):
     @property
     def record_value(self) -> dict:
         """Return dict representation of the record for storage."""
-        return {
+        value = {
             prop: getattr(self, prop)
             for prop in (
                 "status_purpose",
@@ -110,6 +115,11 @@ class StatusListDef(BaseRecord):
                 "verification_method",
             )
         }
+        # Stored only when set: older plugin versions reject unknown keys on load.
+        for prop in ("signing_multikey", "issuer_id"):
+            if getattr(self, prop):
+                value[prop] = getattr(self, prop)
+        return value
 
     def get_random_entry(self) -> tuple:
         """Return a random entry from the status list."""
@@ -243,6 +253,24 @@ class StatusListDefSchema(BaseRecordSchema):
             "example": (
                 "did:web:example.com#z6Mkgg342Ycpuk263R9d8Aq6MUaxPn1DDeHyGo38EefXmgDL"
             ),
+        },
+    )
+    signing_multikey = fields.Str(
+        required=False,
+        metadata={
+            "description": (
+                "Multikey of the wallet key that signs the status list. "
+                "Takes priority over issuer_did and verification_method."
+            ),
+            "example": "zDnaeZv4cPZ9zVfMvxWdjnXc1hFXY9LYM894FyZpVsGHnx3oG",
+        },
+    )
+    issuer_id = fields.Str(
+        required=False,
+        validate=Uri(),
+        metadata={
+            "description": "Issuer identifier for signing_multikey",
+            "example": "https://issuer.example.com",
         },
     )
 
