@@ -94,6 +94,8 @@ With `signing_multikey`, the certificate chain comes from the `x509_certs` plugi
 
 The Token Status List draft (Section 11.3) recommends that an issuer signing both its credentials and their status list use the same key or certificate for both. The plugin does not check this; set `signing_multikey` to the key the credentials are signed with.
 
+For IETF lists, the OID4VC public endpoint returns a CWT (`application/statuslist+cwt`) when the request's `Accept` header includes `application/statuslist+cwt`, and otherwise a JWT (`application/statuslist+jwt`). W3C and raw lists are returned as `text/plain`.
+
 ### How it works
 
 #### Credential Issuance

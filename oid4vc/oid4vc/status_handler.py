@@ -58,8 +58,10 @@ class StatusHandler:
                 context, supported_cred_id, exchange_id
             )
 
-    async def get_status_list(self, context, list_number):
+    async def get_status_list(self, context, list_number, accept=None):
         """Get status list."""
 
         if self.handler:
-            return await self.handler.get_status_list_token(context, list_number)
+            return await self.handler.get_status_list_token(
+                context, list_number, accept=accept
+            )
