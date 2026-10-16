@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     DPOP_REQUIRED: bool = False
     DPOP_NONCE_SECRET: str = ""
     DPOP_NONCE_INTERVAL: int = 60
+    DPOP_PROOF_MAX_AGE: int = 60
 
     # Database
     DB_DRIVER_ASYNC: str = "postgresql+asyncpg"

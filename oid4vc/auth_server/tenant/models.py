@@ -120,7 +120,7 @@ class RefreshToken(Base):
 
 
 class JtiSeen(Base):
-    """JTI replay-prevention for private_key_jwt and attestation PoP."""
+    """JTI replay-prevention for private_key_jwt, attestation PoP, and DPoP proofs."""
 
     __tablename__ = "jti_seen"
 

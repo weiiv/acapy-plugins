@@ -201,10 +201,11 @@ async def test_dpop_policy_matrix(monkeypatch, enabled, required, has_proof, exp
     server = DummyServer()
     headers = {"DPoP": "proof"} if has_proof else None
     request = make_request({"pre_authorized_code": "abc"}, headers=headers)
-    validator = Mock(return_value="dpop-jkt")
+    validator = AsyncMock(return_value="dpop-jkt")
+    db = object()
     monkeypatch.setattr(
         "tenant.oauth.grants.get_context",
-        lambda _req: SimpleNamespace(uid="tenant-1", db=object()),
+        lambda _req: SimpleNamespace(uid="tenant-1", db=db),
     )
     monkeypatch.setattr("tenant.oauth.grants.settings.ATTESTATION_ENABLED", False)
     monkeypatch.setattr("tenant.oauth.grants.settings.DPOP_ENABLED", enabled)
@@ -219,7 +220,7 @@ async def test_dpop_policy_matrix(monkeypatch, enabled, required, has_proof, exp
     else:
         await grant.validate_token_request()
         if expected == "validate":
-            validator.assert_called_once_with(request)
+            validator.assert_awaited_once_with(request, db=db)
             assert grant._dpop_jkt == "dpop-jkt"
         else:
             validator.assert_not_called()

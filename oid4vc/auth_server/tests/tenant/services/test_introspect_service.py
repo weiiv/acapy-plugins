@@ -33,6 +33,7 @@ async def test_introspect_returns_active_payload(monkeypatch):
         token_metadata={
             "realm": "tenant-1",
             "iss": "https://issuer",
+            "token_type": "DPoP",
             "authorization_details": [{"type": "openid_credential"}],
             "amr": ["att-pop"],
             "attestation": {"type": "device"},
@@ -54,13 +55,40 @@ async def test_introspect_returns_active_payload(monkeypatch):
 
     assert resp["active"] is True
     assert resp["sub"] == "subject-1"
-    assert resp["token_type"] == "Bearer"
+    # RFC 9449 §6.2: a DPoP-bound token introspects as DPoP with cnf.jkt.
+    assert resp["token_type"] == "DPoP"
     assert resp["realm"] == "tenant-1"
     assert resp["iss"] == "https://issuer"
     assert resp["authorization_details"] == [{"type": "openid_credential"}]
     assert resp["cnf"] == {"jkt": "thumbprint"}
     assert resp["c_nonce"] == "nonce"
     assert resp["c_nonce_expires_in"] == 60
+
+
+@pytest.mark.asyncio
+async def test_introspect_bearer_token_has_no_cnf(monkeypatch):
+    now = datetime.now(timezone.utc)
+    token = SimpleNamespace(
+        token="access-token",
+        revoked=False,
+        expires_at=now + timedelta(minutes=5),
+        issued_at=now - timedelta(minutes=1),
+        subject=SimpleNamespace(uid="subject-1"),
+        token_metadata={"realm": "tenant-1", "attestation": {"cnf_jkt": "att-jkt"}},
+        cnf_jkt=None,
+    )
+
+    monkeypatch.setattr(
+        introspect_service, "AccessTokenRepository", lambda db: DummyRepo(token)
+    )
+    monkeypatch.setattr(introspect_service, "utcnow", lambda: now)
+
+    resp = await introspect_service.introspect_access_token(
+        DummySession(), "tenant-1", "access-token"
+    )
+
+    assert resp["token_type"] == "Bearer"
+    assert "cnf" not in resp
 
 
 @pytest.mark.asyncio

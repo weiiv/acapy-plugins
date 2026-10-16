@@ -1,6 +1,8 @@
 """Token endpoint for OID4VCI."""
 
+import base64
 import datetime
+import hashlib
 import hmac
 import json
 import time
@@ -223,16 +225,14 @@ async def token(request: web.Request):
 async def check_token(
     context: AdminRequestContext,
     bearer: str | None = None,
+    *,
+    request: web.Request,
 ) -> JWTVerifyResult:
     """Validate the OID4VCI token.
 
-    Accepts both ``Bearer`` and ``DPoP`` Authorization schemes.  When
-    ``dpop_signing_alg_values_supported`` is advertised in the server
-    metadata, DPoP-capable clients (e.g. Credo 0.6.x) will present an
-    ``Authorization: DPoP <token>`` header.  We accept and verify the
-    access-token JWT in both cases; the DPoP proof itself is not
-    cryptographically validated here (full DPoP binding per RFC 9449 is
-    not yet implemented).
+    Accepts both ``Bearer`` and ``DPoP`` Authorization schemes. A token bound to a
+    DPoP key (``cnf.jkt``) must use the ``DPoP`` scheme with a valid DPoP proof
+    (RFC 9449 §7).
     """
     if not bearer:
         raise web.HTTPUnauthorized()
@@ -242,11 +242,6 @@ async def check_token(
         raise web.HTTPUnauthorized() from None
     if scheme.lower() not in ("bearer", "dpop"):
         raise web.HTTPUnauthorized()
-    # NOTE: When scheme is "dpop", the DPoP proof in the DPoP HTTP header is NOT
-    # verified (RFC 9449 §4.3).  We advertise dpop_signing_alg_values_supported
-    # in AS metadata (required by HAIP DPOP-5.1), so wallets such as Credo may
-    # present DPoP-bound tokens.  Accepting without proof verification is a
-    # temporary compatibility measure; full DPoP support is tracked separately.
 
     config = Config.from_settings(context.settings)
     profile = context.profile
@@ -270,25 +265,114 @@ async def check_token(
         introspect = await resp.json()
         if not introspect.get("active"):
             raise web.HTTPUnauthorized(reason="invalid_token")
-        else:
-            result = JWTVerifyResult(headers={}, payload=introspect, verified=True)
-            return result
+        result = JWTVerifyResult(headers={}, payload=introspect, verified=True)
+    else:
+        result = await jwt_verify(context.profile, cred)
+        if not result.verified:
+            raise web.HTTPUnauthorized(
+                text='{"error": "invalid_token", '
+                '"error_description": "Token verification failed"}',
+                headers={"Content-Type": "application/json"},
+            )
 
-    result = await jwt_verify(context.profile, cred)
-    if not result.verified:
-        raise web.HTTPUnauthorized(
-            text='{"error": "invalid_token", '
-            '"error_description": "Token verification failed"}',
-            headers={"Content-Type": "application/json"},
-        )
+        if result.payload["exp"] < datetime.datetime.now(UTC).timestamp():
+            raise web.HTTPUnauthorized(
+                text='{"error": "invalid_token", "error_description": "Token expired"}',
+                headers={"Content-Type": "application/json"},
+            )
 
-    if result.payload["exp"] < datetime.datetime.now(UTC).timestamp():
-        raise web.HTTPUnauthorized(
-            text='{"error": "invalid_token", "error_description": "Token expired"}',
-            headers={"Content-Type": "application/json"},
-        )
+    cnf = result.payload.get("cnf")
+    bound_jkt = cnf.get("jkt") if isinstance(cnf, dict) else None
+    if bound_jkt:
+        if scheme.lower() != "dpop":
+            # RFC 9449 §7.2: a DPoP-bound token MUST NOT be accepted as a bearer token.
+            raise _dpop_unauthorized("invalid_token", "DPoP-bound token sent as Bearer")
+        _verify_dpop_proof(request, cred, bound_jkt, config.endpoint)
 
     return result
+
+
+_DPOP_ALGS = ("ES256", "ES384", "ES512")
+_DPOP_PROOF_MAX_AGE = 60
+_DPOP_IAT_LEEWAY = 30
+
+
+def _dpop_unauthorized(error: str, description: str) -> web.HTTPUnauthorized:
+    """Build a 401 with a DPoP challenge (RFC 9449 §7.1)."""
+    algs = " ".join(_DPOP_ALGS)
+    return web.HTTPUnauthorized(
+        text=json.dumps({"error": error, "error_description": description}),
+        headers={
+            "Content-Type": "application/json",
+            "WWW-Authenticate": (
+                f'DPoP error="{error}", error_description="{description}", algs="{algs}"'
+            ),
+        },
+    )
+
+
+def _verify_dpop_proof(
+    request: web.Request, access_token: str, bound_jkt: str, public_url: str
+) -> None:
+    """Check the DPoP proof per RFC 9449 §4.3 and its binding to the token."""
+    proofs = request.headers.getall("DPoP", [])
+    if len(proofs) != 1 or "," in proofs[0]:
+        raise _dpop_unauthorized("invalid_dpop_proof", "expected a single DPoP proof")
+    try:
+        enc_header, enc_payload, enc_sig = proofs[0].split(".")
+        header = b64_to_dict(enc_header)
+        claims = b64_to_dict(enc_payload)
+        signature = b64_to_bytes(enc_sig, urlsafe=True)
+    except Exception:
+        raise _dpop_unauthorized("invalid_dpop_proof", "malformed DPoP proof") from None
+
+    if header.get("typ") != "dpop+jwt":
+        raise _dpop_unauthorized("invalid_dpop_proof", "typ must be dpop+jwt")
+    alg = header.get("alg")
+    if alg not in _DPOP_ALGS:
+        raise _dpop_unauthorized("invalid_dpop_proof", "unsupported alg")
+    jwk = header.get("jwk")
+    if not isinstance(jwk, dict) or "d" in jwk:
+        raise _dpop_unauthorized("invalid_dpop_proof", "jwk must be a public key")
+    try:
+        key = Key.from_jwk(jwk)
+        valid = key.verify_signature(
+            f"{enc_header}.{enc_payload}".encode(), signature, sig_type=alg
+        )
+    except Exception:
+        valid = False
+    if not valid:
+        raise _dpop_unauthorized("invalid_dpop_proof", "invalid signature")
+
+    if not claims.get("jti"):
+        raise _dpop_unauthorized("invalid_dpop_proof", "missing jti")
+    if claims.get("htm") != request.method:
+        raise _dpop_unauthorized("invalid_dpop_proof", "htm mismatch")
+    # The proof may name either the advertised public URL or the URL as received.
+    expected_htu = {
+        f"{public_url}{request.path}",
+        str(request.url.with_query(None).with_fragment(None)),
+    }
+    if claims.get("htu") not in expected_htu:
+        raise _dpop_unauthorized("invalid_dpop_proof", "htu mismatch")
+    iat = claims.get("iat")
+    now = time.time()
+    if (
+        not isinstance(iat, (int, float))
+        or iat > now + _DPOP_IAT_LEEWAY
+        or iat < now - _DPOP_PROOF_MAX_AGE
+    ):
+        raise _dpop_unauthorized("invalid_dpop_proof", "iat outside acceptable window")
+    ath = (
+        base64.urlsafe_b64encode(hashlib.sha256(access_token.encode("ascii")).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    if claims.get("ath") != ath:
+        raise _dpop_unauthorized("invalid_dpop_proof", "ath mismatch")
+
+    if key.get_jwk_thumbprint() != bound_jkt:
+        raise _dpop_unauthorized("invalid_token", "Invalid DPoP key binding")
 
 
 async def handle_proof_of_posession(

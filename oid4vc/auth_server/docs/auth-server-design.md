@@ -269,10 +269,9 @@ Attestation is controlled by two environment variables that together define one 
    - If `iss` + `kid` not found → `invalid_client_attestation` (untrusted provider).
    - If signature or claims invalid → `invalid_client_attestation`.
    - On success:
-     - Compute `cnf_jkt = thumbprint(cnf.jwk)` (RFC 7638) and store on `ACCESS_TOKEN.cnf_jkt`.
-     - Record attestation metadata (iss, kid, sub, cnf_jkt, pop_jti, iat, exp) in `ACCESS_TOKEN.metadata`.
+     - Compute `cnf_jkt = thumbprint(cnf.jwk)` (RFC 7638) and record it with the attestation metadata (iss, kid, sub, cnf_jkt, pop_jti, iat, exp) in `ACCESS_TOKEN.metadata`. `ACCESS_TOKEN.cnf_jkt` is reserved for the DPoP key.
      - Add `"att-pop"` to `amr`.
-   - On refresh without new attestation headers, the previous token's attestation metadata and `cnf_jkt` are carried forward to the new access token.
+   - The refresh token is bound to the attested key: a refresh MUST present an attestation whose `cnf_jkt` matches, otherwise it is rejected with `invalid_grant`.
 
 ### Example `/token` Request (with Attestation PoP)
 
@@ -353,9 +352,11 @@ DPoP is controlled by two environment variables that together define one of thre
 > **OID4VCI §13.10 bearer-token constraint:** When DPoP is disabled, bearer access tokens longer than 5 minutes MUST NOT be issued. Set `TENANT_ACCESS_TOKEN_TTL` ≤ 300.
 
 - When enabled, access tokens are issued with `"token_type": "DPoP"`.
-- Access tokens include a `cnf.jkt` claim (JWK Thumbprint per [RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html)) binding the token to the client's DPoP key.
-- Replay protection via `jti` claim on DPoP proof JWTs, tracked in `JTI_SEEN`.
+- Access tokens are bound to the client's DPoP key by its JWK Thumbprint ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html)), stored in `ACCESS_TOKEN.cnf_jkt` and returned as `cnf.jkt` by `/introspect`. The signed access token JWT does not carry `cnf`.
+- For clients without attestation (public clients), the refresh token is bound to the DPoP key: a refresh MUST carry a DPoP proof for the same key ([RFC 9449 §5](https://www.rfc-editor.org/rfc/rfc9449.html#section-5)). Attested clients' refresh tokens follow the attestation binding instead.
+- Replay protection via `jti` claim on DPoP proof JWTs, tracked in `JTI_SEEN` for as long as the proof would be accepted (`iat` + `DPOP_PROOF_MAX_AGE`, or three `DPOP_NONCE_INTERVAL`s when nonces are used).
 - Server-provided nonce support via `DPoP-Nonce` response header and `use_dpop_nonce` error. Nonce challenges are only emitted while DPoP is enabled — a configured `DPOP_NONCE_SECRET` has no effect when `DPOP_ENABLED=false`.
+- Proof lifetime ([RFC 9449 §11.1](https://www.rfc-editor.org/rfc/rfc9449.html#section-11.1)): with a nonce secret configured, the nonce window bounds proof age; without one, proofs whose `iat` is older than `DPOP_PROOF_MAX_AGE` seconds (default 60) are rejected with `invalid_dpop_proof`.
 
 ### 🔑 DPoP Key vs. Attestation Key
 
@@ -467,7 +468,7 @@ When the `DPoP` header is present at `/token`, the Authorization Server MUST:
 
 When the wallet presents a DPoP-bound token at `/credential`, the Credential Issuer MUST:
 
-1. Validate the DPoP proof (steps 1–11 above, with `htu` = credential endpoint URL).
+1. Validate the DPoP proof (steps 1–8 and 10 above, with `htu` = credential endpoint URL). The oid4vc plugin does not issue resource-server nonces (step 9) or track `jti` (step 11).
 2. Verify the `ath` claim equals base64url(SHA-256(access_token)).
 3. Call `/introspect` to get the token's `cnf.jkt`.
 4. Verify `thumbprint(proof.jwk) == cnf.jkt` (key binding check).
@@ -476,13 +477,13 @@ When the wallet presents a DPoP-bound token at `/credential`, the Credential Iss
 
 - `ACCESS_TOKEN.cnf_jkt`: Stores the DPoP key thumbprint bound to the token.
 - `JTI_SEEN.metadata`: For DPoP proofs, stores `{"htm": "POST", "htu": "...", "cnf_jkt": "..."}`.
-- DPoP nonces: Stored server-side with time-based rotation (configurable window).
+- DPoP nonces: Not stored; derived as HMAC(`DPOP_NONCE_SECRET`, time window) with rotation every `DPOP_NONCE_INTERVAL` seconds. The current window ±1 is accepted.
 
 ### 🔒 Error Responses
 
 | Error | HTTP Status | When |
 |-------|-------------|------|
-| `invalid_dpop_proof` | 400 | Malformed proof, bad signature, wrong `htm`/`htu`, expired `iat`, unknown `alg` |
+| `invalid_dpop_proof` | 400 | Malformed proof, bad signature, wrong `htm`/`htu`, expired `iat`, unknown `alg`, replayed `jti` |
 | `use_dpop_nonce` | 400 | Server requires nonce but none provided, or nonce is stale (includes `DPoP-Nonce` header) |
 | `invalid_token` | 401 | DPoP key thumbprint doesn't match `cnf.jkt` on the token (at resource server) |
 
@@ -662,7 +663,7 @@ token_type_hint=access_token
   "active": true,
   "scope": "openid vc_authn vc_business_card",
   "subject_id": "c26fe7f5-6bd8-41c5-b0af-c2f555ec89f7",
-  "token_type": "Bearer",
+  "token_type": "DPoP",
   "exp": 1721031600,
   "iat": 1721028000,
   "sub": "did:example:abcd1234",
@@ -855,7 +856,7 @@ GET /.well-known/openid-configuration
 ### 🔍 Error Handling
 
 - Standard OAuth2 errors: `invalid_token`, `expired_token`, `invalid_grant`, etc.
-- DPoP errors (planned): `invalid_dpop_proof`, `replay_detected`.
+- DPoP errors: `invalid_dpop_proof` (including replayed `jti`), `use_dpop_nonce`.
 - Nonce errors: `invalid_request` for invalid/expired nonces; `too_many_requests` for exceeding rate limits.
 - Attestation errors: `invalid_attestation` if attestation headers are missing/invalid, signature verification fails, Attestation-PoP verification fails, or `iss` + `kid` not found in the allow list.
 
@@ -966,11 +967,11 @@ erDiagram
 - **Logging**: Audit issuance, revocation, refresh events, and attestation outcomes.
 - **Observability**: Middleware logs request start/end with `request_id`, `method`, `path`, `status_code`, and `duration_ms`; protected routes include `client_id`.
 - **Rate Limiting**: Throttle abuse or brute-force attempts.
-- **Token Format**: Access tokens are JWTs with claims (`aud`, `exp`, `cnf`, `amr`, etc.).
+- **Token Format**: Access tokens are JWTs with claims `iss`, `sub`, `iat`, `exp`. DPoP binding (`cnf`), `amr`, and `authorization_details` are returned by `/introspect`, not carried in the JWT.
 - **DPoP Key Lifecycle**: Clients manage DPoP key pairs; rotate if compromised.
 - **CORS**: Restrict cross-origin requests where applicable.
 - **Refresh Token Hashing**: Refresh tokens are stored as SHA-256 hashes; raw values are never persisted.
-- **JTI Replay Prevention**: Client assertion, attestation PoP, and DPoP JTIs are tracked in `JTI_SEEN` (PostgreSQL INSERT ON CONFLICT). Entries persist until the JWT's `exp` claim for client assertions, or a fixed window for attestation PoPs and DPoP proofs. DPoP entries store `htm`, `htu`, and `cnf_jkt` in the `metadata` column.
+- **JTI Replay Prevention**: Client assertion, attestation PoP, and DPoP JTIs are tracked in `JTI_SEEN` (PostgreSQL INSERT ON CONFLICT). Entries persist until the JWT's `exp` claim for client assertions, a fixed window for attestation PoPs, and the proof's acceptance window for DPoP proofs. DPoP entries store `htm`, `htu`, and `cnf_jkt` in the `metadata` column.
 - **SSRF Protection**: `jwks_uri` fetches validate the scheme, resolve DNS hostnames, and reject private/loopback/link-local/reserved IP addresses before making HTTP requests.
 - **LRU-bounded Caches**: Tenant context cache, engine pools, and JWKS caches use `OrderedDict`-based LRU eviction to prevent unbounded memory growth.
 - **Migration Safety**: Downgrade operations via `POST /admin/tenants/{uid}/migrations` require explicit `confirm: true` in the request body.

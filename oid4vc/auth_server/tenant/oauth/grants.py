@@ -81,7 +81,7 @@ class _BaseTenantGrant(grants.BaseGrant):
                 status_code=503, detail="attestation_provider_unavailable"
             ) from ex
 
-    def _validate_dpop(self) -> str | None:
+    async def _validate_dpop(self) -> str | None:
         """Validate DPoP proof if present or required.
 
         Returns the JWK thumbprint (jkt) on success, None if DPoP not used.
@@ -95,7 +95,8 @@ class _BaseTenantGrant(grants.BaseGrant):
             return None
         if not has_dpop and settings.DPOP_REQUIRED:
             raise InvalidDPopProofError("DPoP proof required", algs=["ES256", "ES384"])
-        return validate_dpop_proof(self.request)
+        _, db = self._resolve_tenant()
+        return await validate_dpop_proof(self.request, db=db)
 
 
 class PreAuthorizedCodeGrant(_BaseTenantGrant):
@@ -118,7 +119,7 @@ class PreAuthorizedCodeGrant(_BaseTenantGrant):
         self._attestation_meta = await self._validate_attestation(
             required=settings.ATTESTATION_REQUIRED
         )
-        self._dpop_jkt = self._validate_dpop()
+        self._dpop_jkt = await self._validate_dpop()
 
     async def create_token_response(self):
         """Create token response for pre-authorized_code."""
@@ -172,7 +173,7 @@ class RotatingRefreshTokenGrant(_BaseTenantGrant):
         self._attestation_meta = await self._validate_attestation(
             required=settings.ATTESTATION_REQUIRED
         )
-        self._dpop_jkt = self._validate_dpop()
+        self._dpop_jkt = await self._validate_dpop()
 
     async def create_token_response(self):
         """Create token response for refresh_token."""

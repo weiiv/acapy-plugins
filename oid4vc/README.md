@@ -298,6 +298,8 @@ Example payload to configure an external authorization server:
 
 Supported `auth_type` values: `client_secret_basic`, `client_secret_jwt`, `private_key_jwt`.
 
+If introspection returns `cnf.jkt`, the token is DPoP-bound: the credential and notification endpoints require the `DPoP` scheme and a valid DPoP proof for that key (RFC 9449 §7), and otherwise respond `401` with a `WWW-Authenticate: DPoP` challenge.
+
 ### Creating Supported Credential Records
 
 To issue a credential using OpenID4VCI, the Issuer must first prepare credential issuer metadata including which credentials the Issuer can issue. Below is an example payload to the `POST /oid4vci/credential-supported/create/jwt` endpoint:
@@ -492,7 +494,8 @@ Without this, importing `mso_mdoc` will fail with `ModuleNotFoundError: No modul
 - `ldp_vc`
 - Authorization Code Flow
 - Batch Credential Issuance
-- Full DPoP support (RFC 9449) — DPoP tokens are accepted but the proof is not cryptographically verified
+- DPoP at the built-in token endpoint (it issues Bearer tokens)
+- Resource-server DPoP nonces and DPoP proof `jti` replay tracking
 - We're limited to DID Methods that ACA-Py supports for issuance (more can be added by Plugin, e.g. DID Web); `did:sov`, `did:key`
 
 [oid4vci]: https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html

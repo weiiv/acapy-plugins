@@ -470,6 +470,7 @@ def _rotation_stubs(monkeypatch, prev_access, *, now):
     """Wire the repositories and helpers used by rotate_by_refresh_token."""
     access_exp = now + timedelta(minutes=10)
     refresh_exp = now + timedelta(days=3)
+    created: dict[str, dict] = {}
 
     class StubAccessRepo:
         def __init__(self, _db):
@@ -477,6 +478,7 @@ def _rotation_stubs(monkeypatch, prev_access, *, now):
 
         async def create(self, **kwargs):
             self.created_with = kwargs
+            created["access"] = kwargs
             return SimpleNamespace(id=88, token=kwargs["token"])
 
         async def get_by_id(self, _access_token_id):
@@ -504,6 +506,7 @@ def _rotation_stubs(monkeypatch, prev_access, *, now):
     monkeypatch.setattr(
         token_service, "remote_sign_jwt", AsyncMock(return_value={"jwt": "new-signed"})
     )
+    return created
 
 
 async def test_rotate_requires_matching_attestation_key(monkeypatch):
@@ -512,7 +515,7 @@ async def test_rotate_requires_matching_attestation_key(monkeypatch):
     prev_access = SimpleNamespace(
         id=77,
         subject=SimpleNamespace(uid="sub-456"),
-        token_metadata={"realm": "tenant-2"},
+        token_metadata={"realm": "tenant-2", "attestation": {"cnf_jkt": "bound-jkt"}},
         cnf_jkt="bound-jkt",
     )
     _rotation_stubs(monkeypatch, prev_access, now=now)
@@ -534,7 +537,7 @@ async def test_rotate_rejects_missing_attestation_when_bound(monkeypatch):
     prev_access = SimpleNamespace(
         id=77,
         subject=SimpleNamespace(uid="sub-456"),
-        token_metadata={"realm": "tenant-2"},
+        token_metadata={"realm": "tenant-2", "attestation": {"cnf_jkt": "bound-jkt"}},
         cnf_jkt="bound-jkt",
     )
     _rotation_stubs(monkeypatch, prev_access, now=now)
@@ -556,10 +559,10 @@ async def test_rotate_accepts_matching_attestation_key(monkeypatch):
     prev_access = SimpleNamespace(
         id=77,
         subject=SimpleNamespace(uid="sub-456"),
-        token_metadata={"realm": "tenant-2"},
+        token_metadata={"realm": "tenant-2", "attestation": {"cnf_jkt": "bound-jkt"}},
         cnf_jkt="bound-jkt",
     )
-    _rotation_stubs(monkeypatch, prev_access, now=now)
+    created = _rotation_stubs(monkeypatch, prev_access, now=now)
 
     (
         access_token,
@@ -575,3 +578,149 @@ async def test_rotate_accepts_matching_attestation_key(monkeypatch):
 
     assert access_token.token == "new-signed"
     assert refresh_token == "refresh-new"
+    assert created["access"]["token_metadata"]["attestation"]["cnf_jkt"] == "bound-jkt"
+    # Attestation alone does not DPoP-bind the access token.
+    assert created["access"]["cnf_jkt"] is None
+    assert "token_type" not in created["access"]["token_metadata"]
+
+
+async def test_rotate_accepts_same_dpop_key(monkeypatch):
+    """RFC 9449 §5: a DPoP-bound refresh token rotates with the same key."""
+    now = datetime(2025, 2, 2, tzinfo=timezone.utc)
+    prev_access = SimpleNamespace(
+        id=77,
+        subject=SimpleNamespace(uid="sub-456"),
+        token_metadata={"realm": "tenant-2", "token_type": "DPoP"},
+        cnf_jkt="dpop-jkt",
+    )
+    created = _rotation_stubs(monkeypatch, prev_access, now=now)
+
+    await token_service.TokenService.rotate_by_refresh_token(
+        db=DummySession(),
+        uid="tenant-2",
+        refresh_token_value="existing-refresh",
+        realm="tenant-2",
+        dpop_jkt="dpop-jkt",
+    )
+
+    assert created["access"]["cnf_jkt"] == "dpop-jkt"
+    assert created["access"]["token_metadata"]["token_type"] == "DPoP"
+
+
+@pytest.mark.parametrize("dpop_jkt", [None, "other-jkt"])
+async def test_rotate_rejects_wrong_or_missing_dpop_key(monkeypatch, dpop_jkt):
+    """RFC 9449 §5: a DPoP-bound refresh token requires a proof for the same key."""
+    now = datetime(2025, 2, 2, tzinfo=timezone.utc)
+    prev_access = SimpleNamespace(
+        id=77,
+        subject=SimpleNamespace(uid="sub-456"),
+        token_metadata={"realm": "tenant-2", "token_type": "DPoP"},
+        cnf_jkt="dpop-jkt",
+    )
+    _rotation_stubs(monkeypatch, prev_access, now=now)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await token_service.TokenService.rotate_by_refresh_token(
+            db=DummySession(),
+            uid="tenant-2",
+            refresh_token_value="existing-refresh",
+            realm="tenant-2",
+            dpop_jkt=dpop_jkt,
+        )
+    assert exc_info.value.status_code == 401
+
+
+async def test_rotate_attested_client_may_change_dpop_key(monkeypatch):
+    """Attested clients' refresh tokens follow the attestation binding, not DPoP."""
+    now = datetime(2025, 2, 2, tzinfo=timezone.utc)
+    prev_access = SimpleNamespace(
+        id=77,
+        subject=SimpleNamespace(uid="sub-456"),
+        token_metadata={
+            "realm": "tenant-2",
+            "token_type": "DPoP",
+            "attestation": {"cnf_jkt": "att-jkt"},
+        },
+        cnf_jkt="dpop-old",
+    )
+    created = _rotation_stubs(monkeypatch, prev_access, now=now)
+
+    await token_service.TokenService.rotate_by_refresh_token(
+        db=DummySession(),
+        uid="tenant-2",
+        refresh_token_value="existing-refresh",
+        realm="tenant-2",
+        attestation={"cnf_jkt": "att-jkt"},
+        dpop_jkt="dpop-new",
+    )
+
+    assert created["access"]["cnf_jkt"] == "dpop-new"
+
+
+@pytest.mark.parametrize(
+    ("dpop_jkt", "expected_cnf_jkt", "expected_token_type"),
+    [(None, None, None), ("dpop-jkt", "dpop-jkt", "DPoP")],
+)
+async def test_issue_binds_cnf_jkt_to_dpop_key_only(
+    monkeypatch, dpop_jkt, expected_cnf_jkt, expected_token_type
+):
+    """cnf_jkt carries the DPoP key; the attestation key stays in metadata."""
+    now = datetime(2025, 2, 2, tzinfo=timezone.utc)
+    pac = SimpleNamespace(
+        id=1,
+        tx_code=None,
+        used=False,
+        expires_at=_FAR_FUTURE,
+        subject=SimpleNamespace(uid="sub-1"),
+        subject_id=10,
+        authorization_details=None,
+    )
+    created: dict[str, dict] = {}
+
+    class StubGrantRepo:
+        def __init__(self, _db):
+            pass
+
+        async def get_by_code(self, _code):
+            return pac
+
+        async def consume_valid(self, _pac_id, _consumed_at):
+            return True
+
+    class StubAccessRepo:
+        def __init__(self, _db):
+            pass
+
+        async def create(self, **kwargs):
+            created["access"] = kwargs
+            return SimpleNamespace(id=99, token=kwargs["token"])
+
+    class StubRefreshRepo:
+        def __init__(self, _db):
+            pass
+
+        async def create(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(token_service, "GrantRepository", StubGrantRepo)
+    monkeypatch.setattr(token_service, "AccessTokenRepository", StubAccessRepo)
+    monkeypatch.setattr(token_service, "RefreshTokenRepository", StubRefreshRepo)
+    monkeypatch.setattr(token_service, "utcnow", lambda: now)
+    monkeypatch.setattr(token_service.settings, "INCLUDE_NONCE", False, raising=False)
+    monkeypatch.setattr(
+        token_service, "remote_sign_jwt", AsyncMock(return_value={"jwt": "signed"})
+    )
+
+    await token_service.TokenService.issue_by_pre_auth_code(
+        db=DummySession(),
+        uid="tenant-1",
+        code="code-1",
+        realm="tenant-1",
+        attestation={"cnf_jkt": "att-jkt"},
+        dpop_jkt=dpop_jkt,
+    )
+
+    token_meta = created["access"]["token_metadata"]
+    assert created["access"]["cnf_jkt"] == expected_cnf_jkt
+    assert token_meta.get("token_type") == expected_token_type
+    assert token_meta["attestation"]["cnf_jkt"] == "att-jkt"

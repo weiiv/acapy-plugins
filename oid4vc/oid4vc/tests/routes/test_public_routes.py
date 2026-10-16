@@ -1,5 +1,8 @@
+import base64
+import hashlib
 import importlib
 import json
+import time
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,8 +13,12 @@ from acapy_agent.wallet.did_info import DIDInfo
 from acapy_agent.wallet.did_method import KEY
 from acapy_agent.wallet.key_type import ED25519
 from aiohttp import web
+from aiohttp.test_utils import make_mocked_request
+from aries_askar import Key, KeyAlg
+from multidict import CIMultiDict
 
 from oid4vc import public_routes as test_module
+from oid4vc.config import Config
 from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.issuer_config import IssuerConfiguration
 from oid4vc.models.supported_cred import SupportedCredential
@@ -451,7 +458,7 @@ async def test_check_token_valid(monkeypatch, context):
         ),
     )
 
-    result = await check_token(context, "Bearer sometoken")
+    result = await check_token(context, "Bearer sometoken", request=MagicMock())
     assert isinstance(result, JWTVerifyResult)
     assert result.verified
     assert result.payload["exp"] == 9999999999
@@ -460,7 +467,7 @@ async def test_check_token_valid(monkeypatch, context):
 @pytest.mark.asyncio
 async def test_check_token_invalid_scheme(context):
     with pytest.raises(Exception):
-        await check_token(context, "Token sometoken")
+        await check_token(context, "Token sometoken", request=MagicMock())
 
 
 @pytest.mark.asyncio
@@ -474,7 +481,7 @@ async def test_check_token_expired(monkeypatch, context):
         ),
     )
     with pytest.raises(Exception):
-        await check_token(context, "Bearer sometoken")
+        await check_token(context, "Bearer sometoken", request=MagicMock())
 
 
 @pytest.mark.asyncio
@@ -490,7 +497,115 @@ async def test_check_token_invalid_token(monkeypatch, context):
         ),
     )
     with pytest.raises(Exception):
-        await check_token(context, "Bearer sometoken")
+        await check_token(context, "Bearer sometoken", request=MagicMock())
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _dpop_proof(key: Key, htu: str, access_token: str, **overrides) -> str:
+    header = {
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": json.loads(key.get_jwk_public()),
+    }
+    claims = {
+        "jti": "jti-1",
+        "htm": "POST",
+        "htu": htu,
+        "iat": int(time.time()),
+        "ath": _b64(hashlib.sha256(access_token.encode()).digest()),
+    }
+    claims.update(overrides)
+    signing_input = (
+        f"{_b64(json.dumps(header).encode())}.{_b64(json.dumps(claims).encode())}"
+    )
+    signature = key.sign_message(signing_input.encode(), sig_type="ES256")
+    return f"{signing_input}.{_b64(signature)}"
+
+
+def _bound_token(monkeypatch, jkt: str):
+    monkeypatch.setattr(
+        _token_module,
+        "jwt_verify",
+        AsyncMock(
+            return_value=JWTVerifyResult(
+                headers={},
+                payload={"exp": 9999999999, "cnf": {"jkt": jkt}},
+                verified=True,
+            )
+        ),
+    )
+
+
+def _credential_request(*proofs: str) -> web.Request:
+    return make_mocked_request(
+        "POST", "/credential", headers=CIMultiDict(("DPoP", p) for p in proofs)
+    )
+
+
+@pytest.mark.asyncio
+async def test_check_token_accepts_valid_dpop_proof(monkeypatch, context):
+    key = Key.generate(KeyAlg.P256)
+    _bound_token(monkeypatch, key.get_jwk_thumbprint())
+    htu = f"{Config.from_settings(context.settings).endpoint}/credential"
+    request = _credential_request(_dpop_proof(key, htu, "tok"))
+
+    result = await check_token(context, "DPoP tok", request=request)
+
+    assert result.verified
+
+
+@pytest.mark.asyncio
+async def test_check_token_rejects_dpop_bound_token_as_bearer(monkeypatch, context):
+    """RFC 9449 §7.2: a DPoP-bound token MUST NOT be accepted as a bearer token."""
+    key = Key.generate(KeyAlg.P256)
+    _bound_token(monkeypatch, key.get_jwk_thumbprint())
+
+    with pytest.raises(web.HTTPUnauthorized):
+        await check_token(context, "Bearer tok", request=_credential_request())
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["other_key", "ath", "htu", "old_iat", "no_proof", "two_proofs"],
+)
+@pytest.mark.asyncio
+async def test_check_token_rejects_invalid_dpop_proof(monkeypatch, context, case):
+    """RFC 9449 §4.3 and §7.1 checks on a DPoP-bound token."""
+    key = Key.generate(KeyAlg.P256)
+    _bound_token(monkeypatch, key.get_jwk_thumbprint())
+    htu = f"{Config.from_settings(context.settings).endpoint}/credential"
+    proof = {
+        "other_key": _dpop_proof(Key.generate(KeyAlg.P256), htu, "tok"),
+        "ath": _dpop_proof(key, htu, "other-token"),
+        "htu": _dpop_proof(key, "https://elsewhere.example/credential", "tok"),
+        "old_iat": _dpop_proof(key, htu, "tok", iat=int(time.time()) - 3600),
+    }.get(case)
+    proofs = {"no_proof": (), "two_proofs": (_dpop_proof(key, htu, "tok"),) * 2}.get(
+        case, (proof,)
+    )
+
+    with pytest.raises(web.HTTPUnauthorized):
+        await check_token(context, "DPoP tok", request=_credential_request(*proofs))
+
+
+@pytest.mark.asyncio
+async def test_check_token_accepts_unbound_token_with_dpop_scheme(monkeypatch, context):
+    monkeypatch.setattr(
+        _token_module,
+        "jwt_verify",
+        AsyncMock(
+            return_value=JWTVerifyResult(
+                headers={}, payload={"exp": 9999999999}, verified=True
+            )
+        ),
+    )
+
+    result = await check_token(context, "DPoP tok", request=_credential_request())
+
+    assert result.verified
 
 
 @pytest.mark.asyncio

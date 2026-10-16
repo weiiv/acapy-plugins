@@ -5,6 +5,7 @@ for the FastAPI token flow. Returns the JWK thumbprint (jkt) on success
 or raises an OAuth2 error.
 """
 
+import time
 from typing import Any
 
 from authlib.jose import JoseError, JsonWebKey, jwt
@@ -13,12 +14,16 @@ from authlib.oauth2.rfc7636 import create_s256_code_challenge
 from authlib.oauth2.rfc9449 import DPoPProofValidator
 from authlib.oauth2.rfc9449.errors import InvalidDPopProofError, UseDPoPNonceError
 from authlib.oauth2.rfc9449.validator import normalize_url
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.utils.logging import get_logger
 from tenant.config import settings
 from tenant.security.dpop import HmacDPoPNonceGenerator
+from tenant.security.jti_cache import JtiCache
 
 logger = get_logger(__name__)
+
+_dpop_jti_cache = JtiCache()
 
 _ALLOWED_KTY = frozenset({"EC", "OKP", "RSA"})
 
@@ -38,7 +43,7 @@ def _validate_inline_jwk(jwk_obj: Any, *, for_resource: bool, algs: list) -> Non
 
 
 class _FixedDPoPProofValidator(DPoPProofValidator):
-    """Override validate_proof to fix two authlib bugs.
+    """Reimplement proof validation to fix two authlib bugs.
 
     1. Header lookup is case-sensitive ("DPoP") but Starlette lowercases headers.
     2. jwt.decode(proof, None) crashes because JWS can't resolve a None key.
@@ -47,6 +52,13 @@ class _FixedDPoPProofValidator(DPoPProofValidator):
     def validate_proof(
         self, request: OAuth2Request, access_token: str = None, for_resource: bool = False
     ) -> str:
+        """Validate the proof and return its JWK thumbprint."""
+        return self.verify_proof(request, access_token, for_resource)[0]
+
+    def verify_proof(
+        self, request: OAuth2Request, access_token: str = None, for_resource: bool = False
+    ) -> tuple[str, dict[str, Any]]:
+        """Validate the proof and return its JWK thumbprint and claims."""
         # Use lowercase key since Starlette normalizes headers
         proof = request.headers.get("dpop")
         if not proof:
@@ -167,6 +179,22 @@ class _FixedDPoPProofValidator(DPoPProofValidator):
                 for_resource=for_resource,
             )
 
+        # RFC 9449 §11.1: without server nonces, iat alone bounds the proof lifetime.
+        if not self.nonce_generator and claims["iat"] < (
+            int(time.time()) - settings.DPOP_PROOF_MAX_AGE
+        ):
+            logger.debug(
+                "DPoP proof too old: iat=%s max_age=%s jti=%s",
+                claims["iat"],
+                settings.DPOP_PROOF_MAX_AGE,
+                claims.get("jti"),
+            )
+            raise InvalidDPopProofError(
+                description="DPoP proof expired",
+                algs=self.algs,
+                for_resource=for_resource,
+            )
+
         # Validation 10 — nonce
         if self.nonce_generator:
             if "nonce" not in claims:
@@ -197,7 +225,7 @@ class _FixedDPoPProofValidator(DPoPProofValidator):
             uri,
             bool(access_token),
         )
-        return jkt
+        return jkt, claims
 
 
 # Module-level singleton — initialized lazily on first use
@@ -220,22 +248,36 @@ def _get_validator() -> _FixedDPoPProofValidator:
     return _validator
 
 
-def validate_dpop_proof(
+async def validate_dpop_proof(
     oauth2_request: OAuth2Request,
     *,
+    db: AsyncSession,
     access_token: str | None = None,
 ) -> str:
-    """Validate DPoP proof and return the JWK thumbprint (jkt).
+    """Validate DPoP proof, record its jti, and return the JWK thumbprint (jkt).
 
     Raises:
-        InvalidDPopProofError: proof is malformed or invalid
+        InvalidDPopProofError: proof is malformed, invalid, or replayed
         UseDPoPNonceError: nonce is missing or stale (includes fresh nonce in error)
     """
     validator = _get_validator()
-    return validator.validate_proof(
-        oauth2_request,
-        access_token=access_token,
+    jkt, claims = validator.verify_proof(oauth2_request, access_token=access_token)
+
+    if validator.nonce_generator:
+        # A nonce is accepted in the current window ±1, so at most three intervals.
+        expires_at = time.time() + 3 * settings.DPOP_NONCE_INTERVAL
+    else:
+        expires_at = claims["iat"] + settings.DPOP_PROOF_MAX_AGE
+    fresh = await _dpop_jti_cache.check_and_store(
+        claims["jti"],
+        db,
+        expires_at=expires_at,
+        metadata={"htm": claims["htm"], "htu": claims["htu"], "cnf_jkt": jkt},
     )
+    if not fresh:
+        logger.warning("DPoP proof replay: jti=%s jkt=%s", claims["jti"], jkt)
+        raise InvalidDPopProofError("DPoP proof replayed", algs=validator.algs)
+    return jkt
 
 
 def get_dpop_nonce() -> str | None:
