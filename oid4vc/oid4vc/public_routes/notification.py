@@ -91,7 +91,7 @@ async def _receive_notification_inner(request: web.Request) -> web.Response:
     """Inner implementation; raises HTTPException on all errors."""
     # Auth check first — raises HTTPUnauthorized on failure
     context: AdminRequestContext = request["context"]
-    await check_token(context, request.headers.get("Authorization"))
+    await check_token(context, request.headers.get("Authorization"), request=request)
 
     try:
         body = await request.json()

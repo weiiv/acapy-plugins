@@ -111,7 +111,9 @@ async def issue_cred(request: web.Request):
     """
     context: AdminRequestContext = request["context"]
     # check_token raises HTTPUnauthorized on auth failures — propagate as-is.
-    token_result = await check_token(context, request.headers.get("Authorization"))
+    token_result = await check_token(
+        context, request.headers.get("Authorization"), request=request
+    )
     refresh_id = token_result.payload["sub"]
     req_body = await request.json()
     LOGGER.info("request: %s", req_body)
