@@ -8,6 +8,17 @@ from tenant.services.well_known_service import build_oauth_auth_server
 
 
 @pytest.mark.asyncio
+async def test_response_types_supported_is_omitted(monkeypatch):
+    monkeypatch.setattr("tenant.services.well_known_service.get_tenant_ctx", AsyncMock())
+
+    doc = await build_oauth_auth_server(
+        "tenant-1", SimpleNamespace(client=SimpleNamespace(host="203.0.113.1"))
+    )
+
+    assert "response_types_supported" not in doc
+
+
+@pytest.mark.asyncio
 async def test_security_features_are_not_advertised_when_disabled(monkeypatch):
     monkeypatch.setattr("tenant.services.well_known_service.get_tenant_ctx", AsyncMock())
     monkeypatch.setattr(
