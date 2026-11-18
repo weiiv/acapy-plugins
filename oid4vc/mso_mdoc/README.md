@@ -14,8 +14,11 @@ Issues and verifies mDocs (including mDLs) using the [`isomdl-uniffi`](https://g
 # Linux x86_64 (used in Docker)
 pip install https://github.com/Indicio-tech/isomdl-uniffi/releases/download/v0.1.0-indicio.1/isomdl_uniffi-0.1.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
-# macOS (Intel/Apple Silicon)
-pip install https://github.com/Indicio-tech/isomdl-uniffi/releases/download/v0.1.0-indicio.1/isomdl_uniffi-0.1.0-py3-none-macosx_11_0_universal2.whl
+# macOS arm64 (Apple Silicon)
+pip install https://github.com/Indicio-tech/isomdl-uniffi/releases/download/v0.1.0-indicio.1/isomdl_uniffi-0.1.0-py3-none-macosx_11_0_arm64.whl
+
+# macOS s86_64 (Intel)
+pip install https://github.com/Indicio-tech/isomdl-uniffi/releases/download/v0.1.0-indicio.1/isomdl_uniffi-0.1.0-py3-none-macosx_10_12_x86_64.whl
 ```
 
 ## Key Management
