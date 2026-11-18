@@ -24,9 +24,9 @@ flowchart LR
         Sign["sign_message<br/>key record → provider"]
     end
     subgraph OID4VC["OID4VC distribution (acapy-plugins)"]
-        X509["x509_certs plugin<br/>/x509/*"]
         Procs["Credential processors<br/>SD-JWT VC · mdoc · jwt_vc_json"]
     end
+    X509["Standalone x509_certs plugin<br/>/x509/*"]
     PKCS11["PKCS#11 plugin<br/>no routes"]
     HSM[("HSM")]
     Tenant --> Keys & X509 & Procs
@@ -90,7 +90,14 @@ Repository: acapy-plugins (new plugin, replaces KMSLITE). No HTTP routes.
 
 ## X.509 Plugin
 
-Repository: acapy-plugins. A plugin package named `x509_certs` in the OID4VC distribution, beside `mso_mdoc`, loaded with `--plugin x509_certs`. The name avoids a clash with the `x509` package on PyPI.
+Repository: acapy-plugins. The independently installable
+[`x509_certs` project](../../../a7-x509-certs/x509_certs/README.md) owns the
+certificate and trust-anchor API. OID4VC depends on this standalone
+distribution. Load its routes with `--plugin x509_certs.v1_0`, the version
+OID4VC imports from.
+
+The current B1 dependency uses the adjacent A7 worktree temporarily; see the
+[local setup and release requirement](../README.md#x509-certificates).
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -128,16 +135,12 @@ Certificates and trust anchors each require a purpose from a fixed list; other v
 
 `POST /x509/certificates/self-signed` is disabled unless a plugin setting enables it. HAIP 1.0 (Section 6.1.1) forbids a self-signed certificate signing an SD-JWT VC, so these certificates are for demos only.
 
-### Moving into ACA-Py later
+### Package boundary
 
-If X.509 is needed outside OID4VC, the package moves to `acapy_agent.x509`. To keep that a rename:
-
-- Use relative imports inside the package.
-- Other packages import only from the package entry point.
-- Do not import other OID4VC modules.
-- Keep record types, tags, and `/x509` paths stable.
-
-At the move, the OID4VC distribution stops registering `/x509` routes, keeps a re-export for existing imports, and raises its required `acapy-agent` version.
+The standalone plugin owns its routes, records and tests. OID4VC credential
+processors import its public API from `x509_certs.v1_0`; OID4VC keeps its own
+test fixtures rather than importing another distribution's tests. The plugin
+does not require the external-signer core release.
 
 ## OID4VC Today
 

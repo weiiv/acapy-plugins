@@ -256,10 +256,9 @@ speedups = ["Brotli (>=1.2) ; platform_python_implementation == \"CPython\" and 
 name = "aiohttp-apispec-acapy"
 version = "3.0.3"
 description = "Build and document REST APIs with aiohttp and apispec"
-optional = true
+optional = false
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"aca-py\""
 files = [
     {file = "aiohttp_apispec_acapy-3.0.3-py3-none-any.whl", hash = "sha256:9a5d335c22975da1bbde49ddc04c138ee285d7c38354e88b43babef2eec0bc54"},
     {file = "aiohttp_apispec_acapy-3.0.3.tar.gz", hash = "sha256:8cec5f2601f8c2d7d53dd4aebab3975a596d86ea3a1a362eb3b1adadc11662b3"},
@@ -333,10 +332,9 @@ markers = {main = "extra == \"aca-py\""}
 name = "apispec"
 version = "6.10.1"
 description = "A pluggable API specification generator. Currently supports the OpenAPI Specification (f.k.a. the Swagger specification)."
-optional = true
+optional = false
 python-versions = ">=3.11"
 groups = ["main"]
-markers = "extra == \"aca-py\""
 files = [
     {file = "apispec-6.10.1-py3-none-any.whl", hash = "sha256:3fd9a4b624dfabf3a9d25610c0fcb743ac8e66495037d914ee3977ec4bf0386b"},
     {file = "apispec-6.10.1.tar.gz", hash = "sha256:46896cb0cab23b4e853e528528937719739f836358832bb8610edd14db1d9c01"},
@@ -2005,10 +2003,9 @@ files = [
 name = "jinja2"
 version = "3.1.6"
 description = "A very fast and expressive template engine."
-optional = true
+optional = false
 python-versions = ">=3.7"
 groups = ["main"]
-markers = "extra == \"aca-py\""
 files = [
     {file = "jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"},
     {file = "jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d"},
@@ -2338,10 +2335,9 @@ testing = ["coverage", "pyyaml"]
 name = "markupsafe"
 version = "3.0.4"
 description = "Safely add untrusted strings to HTML/XML markup."
-optional = true
+optional = false
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"aca-py\""
 files = [
     {file = "markupsafe-3.0.4-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:dd8ea6ebee7aedbf7c749fa80521d9ccf1ba473e0d1e14805caafbaad281c889"},
     {file = "markupsafe-3.0.4-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:dff05cb7016dff1e9fd68f4122c127b65dfc59de5306cfb7ad92f956f230bee2"},
@@ -4279,10 +4275,9 @@ files = [
 name = "webargs"
 version = "8.7.1"
 description = "Declarative parsing and validation of HTTP request objects, with built-in support for popular web frameworks, including Flask, Django, Bottle, Tornado, Pyramid, Falcon, and aiohttp."
-optional = true
+optional = false
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"aca-py\""
 files = [
     {file = "webargs-8.7.1-py3-none-any.whl", hash = "sha256:a184aed9d2509e6e14ab99ee3e9dc3a614c7070affe94cd4dfdb0d002e0a6e5f"},
     {file = "webargs-8.7.1.tar.gz", hash = "sha256:799bf9039c76c23fd8dc1951107a75a9e561203c15d6ae8f89c1e46e234636c1"},
@@ -4297,6 +4292,29 @@ dev = ["pre-commit (>=3.5,<5.0)", "tox", "webargs[tests]"]
 docs = ["Sphinx (==8.2.3)", "furo (==2025.9.25)", "sphinx-issues (==5.0.1)", "webargs[frameworks]"]
 frameworks = ["Django (>=2.2.0)", "Flask (>=0.12.5)", "aiohttp (>=3.0.8)", "bottle (>=0.12.13)", "falcon (>=2.0.0)", "pyramid (>=1.9.1)", "tornado (>=4.5.2)"]
 tests = ["packaging (>=17.0)", "pytest", "pytest-aiohttp (>=0.3.0)", "pytest-asyncio", "webargs[frameworks]", "webtest (==3.0.7)", "webtest-aiohttp (==2.0.0)"]
+
+[[package]]
+name = "x509-certs"
+version = "0.1.0"
+description = "X.509 certificates for ACA-Py wallet keys, and trust anchors for chain verification"
+optional = false
+python-versions = "^3.13"
+groups = ["main"]
+files = []
+develop = false
+
+[package.dependencies]
+aiohttp = "^3.14.4"
+aiohttp-apispec-acapy = "~3.0.3"
+cryptography = ">=42.0.0,<51.0.0"
+marshmallow = "^3.26.1"
+
+[package.extras]
+aca-py = ["acapy-agent (>=1.7.0,<1.8.0)"]
+
+[package.source]
+type = "directory"
+url = "../../a7-x509-certs/x509_certs"
 
 [[package]]
 name = "yarl"
@@ -4459,4 +4477,4 @@ sd-jwt-vc = ["jsonpointer"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.13"
-content-hash = "6df95a3c406078fd44f7d6f39bf321e21bb85fd61fb3e5d18f7306956946351e"
+content-hash = "c801aa3b848a71005c12ed9f590d3a384a2600c0c53db0948942379e7be81f93"

@@ -23,10 +23,10 @@ from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.public_routes import PopResult
 from oid4vc.routes.exchange import create_exchange
+from oid4vc.tests.pki import NOW, Pki, wallet_public_key
 from sd_jwt_vc.cred_processor import SdJwtCredIssueProcessor
-from x509_certs import X509CertificateRecord
-from x509_certs.certs import describe, to_x5c
-from x509_certs.tests.conftest import NOW, Pki, wallet_public_key
+from x509_certs.v1_0 import X509CertificateRecord
+from x509_certs.v1_0.certs import describe, to_x5c
 
 ISSUER_ID = "https://issuer.example.com"
 HOLDER_KID = "did:key:z6MkgKA7yrw5kYSiDuQFcye4bMaJpcfHFry3Bx45pdWh3s8i#0"

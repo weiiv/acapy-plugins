@@ -2,6 +2,21 @@
 
 This plugin implements [OpenID4VCI 1.0][oid4vci]. This implementation follows the OpenID4VCI 1.0 final specification and is not backwards compatible with earlier drafts.
 
+## X.509 Certificates
+
+Multikey SD-JWT VC and mdoc issuance depend on the
+[standalone X.509 plugin](../../a7-x509-certs/x509_certs/README.md). Add
+`--plugin x509_certs.v1_0` to load its certificate and trust-anchor management
+routes.
+
+For this local B1 checkout, Poetry installs the standalone project from
+`../../a7-x509-certs/x509_certs`. Keep the A7 worktree beside B1 under `wt`,
+then run `poetry install --all-extras` from this directory.
+
+This dependency is temporary and local-only. Replace it with a published
+version or a pinned Git reference before opening B1's PR. Docker builds and
+installation outside this worktree layout require that portable reference.
+
 ## Developer Documentation
 
 | Document | Description |

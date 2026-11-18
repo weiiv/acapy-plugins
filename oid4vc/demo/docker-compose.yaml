@@ -52,6 +52,7 @@ services:
         --plugin sd_jwt_vc
         --plugin mso_mdoc
         --plugin status_list.v1_0
+        --plugin x509_certs.v1_0
         --multitenant
         --multitenant-admin
         --jwt-secret insecure

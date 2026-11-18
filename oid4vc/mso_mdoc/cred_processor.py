@@ -29,7 +29,7 @@ from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.presentation import OID4VPPresentation
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.pop_result import PopResult
-from x509_certs import (
+from x509_certs.v1_0 import (
     X509Error,
     X509TrustAnchorRecord,
     embedded_x5c,
