@@ -23,7 +23,7 @@ pip install https://github.com/Indicio-tech/isomdl-uniffi/releases/download/v0.1
 
 ## Key Management
 
-The issuer key is a P-256 wallet key, given per exchange as `signing_multikey`. Its document-signer certificate is managed by the [standalone X.509 plugin](../README.md#x509-certificates) (`--plugin x509_certs.v1_0`) with purpose `mdoc_ds`.
+The issuer key is a P-256 wallet key, given per exchange as `signing_multikey`. Its document-signer certificate is managed by the [standalone X.509 plugin](../README.md#x509-certificates) (`--plugin x509_certs`) with purpose `mdoc_ds`.
 
 ```
 POST /wallet/keys {"alg": "p256"}             →  { multikey }

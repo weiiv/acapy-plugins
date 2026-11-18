@@ -6,7 +6,7 @@ This plugin implements [OpenID4VCI 1.0][oid4vci]. This implementation follows th
 
 Multikey SD-JWT VC and mdoc issuance depend on the
 [standalone X.509 plugin](../../a7-x509-certs/x509_certs/README.md). Add
-`--plugin x509_certs.v1_0` to load its certificate and trust-anchor management
+`--plugin x509_certs` to load its certificate and trust-anchor management
 routes.
 
 For this local B1 checkout, Poetry installs the standalone project from

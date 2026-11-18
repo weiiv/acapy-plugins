@@ -18,8 +18,8 @@ from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.pop_result import PopResult
 from oid4vc.tests.pki import NOW, wallet_public_key
-from x509_certs.v1_0 import X509CertificateRecord, X509TrustAnchorRecord
-from x509_certs.v1_0.certs import describe, to_pem, to_x5c
+from x509_certs import X509CertificateRecord, X509TrustAnchorRecord
+from x509_certs.certs import describe, to_pem, to_x5c
 
 DOCTYPE = "org.example.doc"
 MDL_DS_EKU = "1.0.18013.5.1.2"

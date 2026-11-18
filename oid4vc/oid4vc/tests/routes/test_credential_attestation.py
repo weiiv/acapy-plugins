@@ -430,6 +430,7 @@ async def test_batch_shared_status_and_timestamps(
     exchange.issuer_id = "did:example:issuer"
     exchange.verification_method = "did:example:issuer#0"
     exchange.notification_id = "batch-notification"
+    exchange.signing_multikey = None
 
     claims = []
 
@@ -453,8 +454,8 @@ async def test_batch_shared_status_and_timestamps(
             raise ValueError("signing failed")
         return json.dumps(payload)
 
-    async def sign_sd(sd_list, payload, headers, profile, did, ver_method):
-        return await sign_jwt(profile, headers, payload)
+    async def sign_sd(sd_list, payload, headers, profile, did, ver_method, **kwargs):
+        return await sign_jwt(profile, headers, payload, **kwargs)
 
     monkeypatch.setattr(jwt_module, "jwt_sign", sign_jwt)
     monkeypatch.setattr(sd_module, "sd_jwt_sign", sign_sd)

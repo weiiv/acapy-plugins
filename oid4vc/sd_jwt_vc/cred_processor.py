@@ -34,7 +34,7 @@ from oid4vc.models.presentation import OID4VPPresentation
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.pop_result import PopResult
 from oid4vc.status_handler import StatusHandler
-from x509_certs.v1_0 import X509Error, embedded_x5c, select_certificate
+from x509_certs import X509Error, embedded_x5c, select_certificate
 
 LOGGER = logging.getLogger(__name__)
 # Certain claims, if present, are never to be included in the selective disclosures list.

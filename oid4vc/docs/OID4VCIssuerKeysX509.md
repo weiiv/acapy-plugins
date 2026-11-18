@@ -93,8 +93,7 @@ Repository: acapy-plugins (new plugin, replaces KMSLITE). No HTTP routes.
 Repository: acapy-plugins. The independently installable
 [`x509_certs` project](../../../a7-x509-certs/x509_certs/README.md) owns the
 certificate and trust-anchor API. OID4VC depends on this standalone
-distribution. Load its routes with `--plugin x509_certs.v1_0`, the version
-OID4VC imports from.
+distribution. Load its routes with `--plugin x509_certs`.
 
 The current B1 dependency uses the adjacent A7 worktree temporarily; see the
 [local setup and release requirement](../README.md#x509-certificates).
@@ -138,7 +137,7 @@ Certificates and trust anchors each require a purpose from a fixed list; other v
 ### Package boundary
 
 The standalone plugin owns its routes, records and tests. OID4VC credential
-processors import its public API from `x509_certs.v1_0`; OID4VC keeps its own
+processors import its public API from `x509_certs`; OID4VC keeps its own
 test fixtures rather than importing another distribution's tests. The plugin
 does not require the external-signer core release.
 

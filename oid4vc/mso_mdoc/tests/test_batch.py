@@ -1,31 +1,30 @@
 import base64
 import json
+from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import cbor2
 from acapy_agent.admin.request_context import AdminRequestContext
 from acapy_agent.utils.testing import create_test_profile
+from acapy_agent.wallet.key_type import KeyTypes
+from acapy_agent.wallet.keys.manager import MultikeyManager
 from aries_askar import Key, KeyAlg
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from mso_mdoc import cred_processor as test_module
-from mso_mdoc.signing_key import (
-    generate_ec_p256_key_pem,
-    generate_self_signed_certificate,
-)
+from mso_mdoc.tests.test_cred_processor import _store_ds_certificate
 from oid4vc.cred_processor import CredProcessors
 from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.issuer_config import IssuerConfiguration
 from oid4vc.models.wallet_provider import WalletProvider
 from oid4vc.public_routes.credential import _issue_cred_inner
 from oid4vc.public_routes.nonce import create_nonce
+from oid4vc.tests.pki import NOW, make_cert
 from oid4vc.tests.test_key_attestation import ISS, KID, make_attestation
 from oid4vc.utils import get_wallet_id
 
 
-async def test_real_mdoc_batch_binding_and_native_validity(
-    supported, ex_record, monkeypatch
-):
+async def test_real_mdoc_batch_binding_and_native_validity(supported, ex_record):
     profile = await create_test_profile(
         {
             "plugin_config": {
@@ -41,22 +40,29 @@ async def test_real_mdoc_batch_binding_and_native_validity(
     profile.context.injector.bind_instance(
         CredProcessors, CredProcessors({"mso_mdoc": processor})
     )
+    profile.context.injector.bind_instance(KeyTypes, KeyTypes())
     context = AdminRequestContext(profile)
-    private_key = generate_ec_p256_key_pem()
-    certificate = generate_self_signed_certificate(private_key)
-    monkeypatch.setattr(
-        processor,
-        "_resolve_signing_key",
-        AsyncMock(
-            return_value={"private_key_pem": private_key, "certificate_pem": certificate}
+    async with profile.session() as session:
+        multikey = (await MultikeyManager(session).create(alg="p256"))["multikey"]
+    iaca_key = ec.generate_private_key(ec.SECP256R1())
+    iaca = (
+        iaca_key,
+        make_cert(
+            "Test IACA",
+            iaca_key.public_key(),
+            iaca_key,
+            ca=True,
+            not_after=NOW + timedelta(days=3650),
         ),
     )
+    await _store_ds_certificate(profile, multikey, iaca, days=60)
     supported.format = "mso_mdoc"
     supported.identifier = "example"
     supported.format_data = {"doctype": "org.iso.example"}
     supported.proof_types_supported = {
         "attestation": {"proof_signing_alg_values_supported": ["ES256"]}
     }
+    ex_record.signing_multikey = multikey
     signer = Key.generate(KeyAlg.P256)
     async with profile.session() as session:
         await WalletProvider(

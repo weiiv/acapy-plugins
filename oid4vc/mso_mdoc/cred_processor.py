@@ -29,7 +29,7 @@ from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.presentation import OID4VPPresentation
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.pop_result import PopResult
-from x509_certs.v1_0 import (
+from x509_certs import (
     X509Error,
     X509TrustAnchorRecord,
     embedded_x5c,
@@ -449,6 +449,7 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
                     make_wallet_signer(wallet, verkey),
                     certificate_chain_for,
                 )
+
             # Normalize mDoc result handling for robust string/bytes processing
             mso_mdoc = normalize_mdoc_result(mso_mdoc)
 
