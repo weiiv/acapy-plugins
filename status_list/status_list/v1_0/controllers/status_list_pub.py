@@ -14,6 +14,7 @@ from marshmallow import fields
 
 from .. import status_handler
 from ..config import Config
+from ..error import StatusListError
 from ..models import StatusListDef
 
 LOGGER = logging.getLogger(__name__)
@@ -99,6 +100,9 @@ async def publish_status_list(request: web.BaseRequest):
 
     except StorageNotFoundError as err:
         raise web.HTTPNotFound(reason=err.roll_up) from err
+
+    except StatusListError as err:
+        raise web.HTTPBadRequest(reason=err.roll_up) from err
 
     except (StorageError, BaseModelError, BaseError) as err:
         raise web.HTTPInternalServerError(reason=err.roll_up) from err

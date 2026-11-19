@@ -15,6 +15,7 @@ acapy-agent = { version = "~1.7.0", optional = true }
 bitarray = "^3.0.0"
 filelock = ">=3.25.2,<5.0.0"
 cbor2 = "^5.4.2"
+x509-certs = { git = "https://github.com/openwallet-foundation/acapy-plugins.git", branch = "main", subdirectory = "x509_certs" }
 
 [tool.poetry.extras]
 aca-py = ["acapy-agent"]

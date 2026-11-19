@@ -1,14 +1,15 @@
 """COSE_Sign1 (CWT) signing for IETF Token Status List.
 
 Produces `application/statuslist+cwt` artifacts per
-draft-ietf-oauth-status-list, using the same DID / wallet key material
-as the JWT publication path. `wallet.sign_message` already returns
+draft-ietf-oauth-status-list, using the same key material as the JWT
+publication path. `wallet.sign_message` already returns
 COSE-compatible signatures for the supported key types (Ed25519: raw
 64-byte EdDSA; P-256: raw R||S), so no private-key extraction is
 needed.
 """
 
-from typing import Any, Dict, Mapping, Optional
+from base64 import b64decode
+from typing import Any, Dict, List, Mapping, Optional
 
 import cbor2
 from acapy_agent.core.profile import Profile
@@ -26,6 +27,7 @@ from acapy_agent.wallet.util import b64_to_bytes
 _HEADER_ALG = 1
 _HEADER_KID = 4
 _HEADER_TYP = 16
+_HEADER_X5CHAIN = 33  # RFC 9360
 
 # COSE algorithm identifiers (RFC 9053). RFC 9864 deprecates these in favour of
 # ESP256 (-9) and Ed25519 (-19); they are kept for interoperability, as the status
@@ -105,6 +107,9 @@ async def cwt_sign(
     payload: Mapping[str, Any],
     did: Optional[str] = None,
     verification_method: Optional[str] = None,
+    *,
+    verkey: Optional[str] = None,
+    x5c: Optional[List[str]] = None,
 ) -> bytes:
     """Create a signed COSE_Sign1 (CWT) for an IETF status list.
 
@@ -112,8 +117,12 @@ async def cwt_sign(
     `status_handler.get_status_list()`. It is mapped to CWT integer
     claim keys before signing. Returns tag-18-wrapped COSE_Sign1 CBOR
     bytes ready to serve as `application/statuslist+cwt`.
+
+    The key is *verkey* when given; otherwise it is resolved from *did* /
+    *verification_method*. Only the DID path adds a `kid`; *x5c* (base64 DER,
+    as in JOSE) is added as `x5chain`.
     """
-    if verification_method is None:
+    if verkey is None and verification_method is None:
         if did is None:
             raise ValueError("did or verification_method required.")
         did = nym_to_did(did)
@@ -123,17 +132,24 @@ async def cwt_sign(
         )
         if not verification_method:
             raise ValueError("Could not determine verification method from DID")
-    else:
+    elif verkey is None:
         did = DIDUrl.parse(verification_method).did
         if not did:
             raise ValueError("DID URL must be absolute")
 
     async with profile.session() as session:
         wallet = session.inject(BaseWallet)
-        did_info = await wallet.get_local_did(did_lookup_name(did))
-        if did_info.key_type == ED25519:
+        if verkey is None:
+            did_info = await wallet.get_local_did(did_lookup_name(did))
+            verkey, key_type = did_info.verkey, did_info.key_type
+            key_id = verification_method
+        else:
+            key_type = (await wallet.get_signing_key(verkey)).key_type
+            key_id = None
+
+        if key_type == ED25519:
             alg = _ALG_EDDSA
-        elif did_info.key_type == P256:
+        elif key_type == P256:
             alg = _ALG_ES256
         else:
             raise ValueError("Unable to determine COSE signing alg for key type")
@@ -141,8 +157,12 @@ async def cwt_sign(
         protected: Dict[int, Any] = {
             _HEADER_ALG: alg,
             _HEADER_TYP: STATUSLIST_CWT_TYP,
-            _HEADER_KID: verification_method.encode("utf-8"),
         }
+        if x5c:
+            certs = [b64decode(cert) for cert in x5c]
+            protected[_HEADER_X5CHAIN] = certs[0] if len(certs) == 1 else certs
+        elif key_id:
+            protected[_HEADER_KID] = key_id.encode("utf-8")
 
         cwt_claims = to_cwt_claims(payload)
         payload_bstr = cbor2.dumps(cwt_claims)
@@ -152,7 +172,7 @@ async def cwt_sign(
         sig_structure = ["Signature1", protected_bstr, b"", payload_bstr]
         to_be_signed = cbor2.dumps(sig_structure)
 
-        signature = await wallet.sign_message(to_be_signed, did_info.verkey)
+        signature = await wallet.sign_message(to_be_signed, verkey)
 
     cose_sign1 = [protected_bstr, {}, payload_bstr, signature]
     return cbor2.dumps(cbor2.CBORTag(_COSE_SIGN1_TAG, cose_sign1))

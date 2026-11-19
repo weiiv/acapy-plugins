@@ -6,9 +6,15 @@ from typing import Any, Dict
 from acapy_agent.admin.decorators.auth import tenant_authentication
 from acapy_agent.admin.request_context import AdminRequestContext
 from acapy_agent.core.error import BaseError
+from acapy_agent.core.profile import ProfileSession
 from acapy_agent.messaging.models.base import BaseModelError
 from acapy_agent.messaging.models.openapi import OpenAPISchema
+from acapy_agent.messaging.valid import Uri
 from acapy_agent.storage.error import StorageError, StorageNotFoundError
+from acapy_agent.wallet.base import BaseWallet
+from acapy_agent.wallet.error import WalletNotFoundError
+from acapy_agent.wallet.key_type import ED25519, P256
+from acapy_agent.wallet.keys.manager import MultikeyManagerError, multikey_to_verkey
 from aiohttp import web
 from aiohttp_apispec import (
     docs,
@@ -28,7 +34,62 @@ from .. import status_handler
 LOGGER = logging.getLogger(__name__)
 
 
-class CreateStatusListDefRequest(OpenAPISchema):
+class SigningKeyRequestSchema(OpenAPISchema):
+    """Signing key fields shared by create and update requests."""
+
+    signing_multikey = fields.Str(
+        required=False,
+        allow_none=True,
+        metadata={
+            "description": (
+                "Multikey of the wallet key that signs the status list. "
+                "Takes priority over issuer_did and verification_method."
+            ),
+            "example": "zDnaeZv4cPZ9zVfMvxWdjnXc1hFXY9LYM894FyZpVsGHnx3oG",
+        },
+    )
+    issuer_id = fields.Str(
+        required=False,
+        allow_none=True,
+        validate=Uri(),
+        metadata={
+            "description": "Issuer identifier for signing_multikey; required for w3c",
+            "example": "https://issuer.example.com",
+        },
+    )
+
+
+async def _check_signing_multikey(
+    session: ProfileSession,
+    multikey: str | None,
+    issuer_id: str | None,
+    list_type: str | None,
+):
+    """Reject a signing_multikey that is malformed, not in the wallet, or unusable."""
+    if not multikey:
+        return
+    try:
+        verkey = multikey_to_verkey(multikey)
+    except (MultikeyManagerError, ValueError) as err:
+        raise web.HTTPBadRequest(reason=f"Invalid signing_multikey: {err}") from err
+    try:
+        key_info = await session.inject(BaseWallet).get_signing_key(verkey)
+    except WalletNotFoundError:
+        raise web.HTTPBadRequest(reason="signing_multikey is not in the wallet") from None
+    if key_info.key_type not in (ED25519, P256):
+        raise web.HTTPBadRequest(
+            reason=(
+                "signing_multikey must be ed25519 or p256, "
+                f"not {key_info.key_type.key_type}"
+            )
+        )
+    if list_type == "w3c" and not issuer_id:
+        raise web.HTTPBadRequest(
+            reason="issuer_id is required with signing_multikey for w3c"
+        )
+
+
+class CreateStatusListDefRequest(SigningKeyRequestSchema):
     """Request schema for creating status list definition."""
 
     supported_cred_id = fields.Str(
@@ -158,6 +219,8 @@ async def create_status_list_def(request: web.BaseRequest):
     list_type = body.get("list_type", None)
     issuer_did = body.get("issuer_did", None)
     verification_method = body.get("verification_method", None)
+    signing_multikey = body.get("signing_multikey") or None
+    issuer_id = body.get("issuer_id") or None
 
     token_format = body.get("token_format") or "jwt"
     if token_format not in ("jwt", "cwt"):
@@ -167,6 +230,8 @@ async def create_status_list_def(request: web.BaseRequest):
 
     try:
         context: AdminRequestContext = request["context"]
+        async with context.session() as session:
+            await _check_signing_multikey(session, signing_multikey, issuer_id, list_type)
         config = Config.from_settings(context.profile.settings)
         wallet_id = status_handler.get_wallet_id(context)
 
@@ -189,6 +254,8 @@ async def create_status_list_def(request: web.BaseRequest):
                 token_format=token_format,
                 issuer_did=issuer_did,
                 verification_method=verification_method,
+                signing_multikey=signing_multikey,
+                issuer_id=issuer_id,
             )
             # Create current status list
             list_number = await status_handler.assign_status_list_number(txn, wallet_id)
@@ -325,11 +392,15 @@ class DeleteStatusListDefRequest(OpenAPISchema):
     )
 
 
-class UpdateStatusListDefRequest(OpenAPISchema):
-    """Request schema for updating status list definition."""
+class UpdateStatusListDefRequest(SigningKeyRequestSchema):
+    """Request schema for updating status list definition.
+
+    Omitted fields are kept; null or empty clears a field.
+    """
 
     list_type = fields.Str(
         required=False,
+        allow_none=True,
         metadata={
             "description": "Status list type: 'w3c', 'ietf' or none",
             "example": "ietf",
@@ -337,6 +408,7 @@ class UpdateStatusListDefRequest(OpenAPISchema):
     )
     issuer_did = fields.Str(
         required=False,
+        allow_none=True,
         metadata={
             "description": "Issuer DID for the status list",
             "example": "did:web:example.com",
@@ -344,6 +416,7 @@ class UpdateStatusListDefRequest(OpenAPISchema):
     )
     verification_method = fields.Str(
         required=False,
+        allow_none=True,
         metadata={
             "description": "Issuer DID for the status list",
             "example": (
@@ -351,6 +424,15 @@ class UpdateStatusListDefRequest(OpenAPISchema):
             ),
         },
     )
+
+
+UPDATABLE_FIELDS = (
+    "list_type",
+    "issuer_did",
+    "verification_method",
+    "signing_multikey",
+    "issuer_id",
+)
 
 
 @docs(
@@ -373,14 +455,19 @@ async def update_status_list_def(request: web.BaseRequest):
             definition = await StatusListDef.retrieve_by_id(
                 txn, definition_id, for_update=True
             )
-            list_type = body.get("list_type", None)
-            if definition.token_format == "cwt" and list_type != "ietf":
+            for field in UPDATABLE_FIELDS:
+                if field in body:
+                    setattr(definition, field, body[field] or None)
+            if definition.token_format == "cwt" and definition.list_type != "ietf":
                 raise web.HTTPBadRequest(
                     reason="token_format 'cwt' requires list_type 'ietf'."
                 )
-            definition.list_type = list_type
-            definition.issuer_did = body.get("issuer_did", None)
-            definition.verification_method = body.get("verification_method", None)
+            await _check_signing_multikey(
+                txn,
+                definition.signing_multikey,
+                definition.issuer_id,
+                definition.list_type,
+            )
 
             # Save updated status list definition
             await definition.save(txn, reason="Update status list definition.")
