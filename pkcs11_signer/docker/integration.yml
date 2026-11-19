@@ -1,0 +1,26 @@
+label: pkcs11_signer
+
+admin: [0.0.0.0, 3001]
+admin-insecure-mode: true
+
+inbound-transport:
+  - [http, 0.0.0.0, 3000]
+outbound-transport: http
+endpoint:
+  - http://host.docker.internal:3000
+
+plugin:
+  - pkcs11_signer
+
+no-ledger: true
+
+log-level: info
+
+auto-accept-invites: true
+auto-respond-messages: true
+
+# Wallet
+auto-provision: true
+wallet-type: askar
+wallet-name: pkcs11-wallet
+wallet-key: insecure

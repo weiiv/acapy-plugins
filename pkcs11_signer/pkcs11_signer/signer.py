@@ -1,0 +1,258 @@
+"""PKCS#11 signer (P-256 only)."""
+
+import asyncio
+import hashlib
+import logging
+from contextlib import asynccontextmanager, contextmanager
+from typing import Any, Callable, List, Optional, Union
+
+import pkcs11
+from pkcs11 import Attribute, KeyType as P11KeyType, Mechanism, ObjectClass
+from pkcs11.exceptions import PKCS11Error
+from pkcs11.util.ec import encode_named_curve_parameters
+
+from acapy_agent.wallet.error import WalletError
+from acapy_agent.wallet.key_type import P256, KeyType
+from acapy_agent.wallet.util import bytes_to_b58
+
+from .config import DEFAULT_POOL_SIZE, DEFAULT_PROVIDER, Pkcs11Config
+
+LOGGER = logging.getLogger(__name__)
+AUDIT = logging.getLogger("pkcs11_signer.audit")
+
+_OCTET_STRING_TAG = 0x04
+
+
+class SignerError(WalletError):
+    """The PKCS#11 backend failed.
+
+    Subclasses WalletError so core's sign dispatch is unaffected. Raised only
+    for faults the caller cannot fix (token unreachable, session dead, backend
+    refused); caller-fixable problems stay plain `WalletError`.
+    """
+
+
+_CURVE_OID_BY_KEY_TYPE = {P256: "secp256r1"}
+
+
+def _unwrap_ec_point(der: bytes) -> bytes:
+    """DER OCTET STRING → raw SEC1 point (short-form length only)."""
+    if len(der) < 2 or der[0] != _OCTET_STRING_TAG:
+        raise SignerError("PKCS11 EC_POINT: not a DER OCTET STRING")
+    length = der[1]
+    if length & 0x80 or length != len(der) - 2:
+        raise SignerError("PKCS11 EC_POINT: unexpected DER length encoding")
+    return der[2:]
+
+
+def _sec1_compress(point: bytes) -> bytes:
+    """Compress an uncompressed SEC1 point; pass through if already compressed."""
+    if not point:
+        raise SignerError("PKCS11 EC_POINT: empty")
+    prefix = point[0]
+    if prefix in (0x02, 0x03):
+        return point
+    if prefix != 0x04 or (len(point) - 1) % 2:
+        raise SignerError(f"PKCS11 EC_POINT: bad prefix/length 0x{prefix:02x}")
+    n = (len(point) - 1) // 2
+    x, y = point[1 : 1 + n], point[1 + n :]
+    return bytes([0x03 if (y[-1] & 1) else 0x02]) + x
+
+
+def _der_point_to_verkey(der: bytes) -> str:
+    """PKCS#11 DER-wrapped EC point → base58(SEC1-compressed) verkey string."""
+    return bytes_to_b58(_sec1_compress(_unwrap_ec_point(der)))
+
+
+@contextmanager
+def _wrap_pkcs11_errors(op: str, key_ref: str):
+    """Rethrow pkcs11 errors as SignerError with op-labeled messages."""
+    try:
+        yield
+    except pkcs11.NoSuchKey as err:
+        raise SignerError(f"PKCS11 {op}: no key on token with label {key_ref!r}") from err
+    except pkcs11.MultipleObjectsReturned as err:
+        raise SignerError(
+            f"PKCS11 {op}: key_ref {key_ref!r} is ambiguous on the token"
+        ) from err
+    except PKCS11Error as err:
+        raise SignerError(f"PKCS11 {op}: {err}") from err
+
+
+class PKCS11Signer:
+    """Signer backed by a PKCS#11 token; one authenticated session per op."""
+
+    def __init__(
+        self,
+        lib_path: str,
+        token_label: str,
+        pin: str,
+        slot: Optional[int] = None,
+        pool_size: int = DEFAULT_POOL_SIZE,
+        provider_name: str = DEFAULT_PROVIDER,
+    ) -> None:
+        if pool_size < 1:
+            raise ValueError("pool_size must be >= 1")
+        self._provider_name = provider_name
+        self._lib = pkcs11.lib(lib_path)
+        self._token = self._open_token(lib_path, token_label, slot)
+        self._pool: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=pool_size)
+        for _ in range(pool_size):
+            self._pool.put_nowait(self._token.open(user_pin=pin, rw=True))
+        LOGGER.info("PKCS11Signer: token=%r pool_size=%d", token_label, pool_size)
+
+    @classmethod
+    def from_config(cls, cfg: Pkcs11Config) -> "PKCS11Signer":
+        """Instantiate from a resolved `Pkcs11Config`."""
+        return cls(
+            lib_path=cfg.library_path,
+            token_label=cfg.token_name,
+            pin=cfg.pin,
+            slot=cfg.slot,
+            pool_size=cfg.pool_size,
+            provider_name=cfg.provider,
+        )
+
+    def _open_token(self, lib_path: str, token_label: str, slot: Optional[int]):
+        """Look the token up by label; `slot` narrows the match when configured."""
+        # get_tokens() has no slot-id filter, so slot narrowing happens here.
+        matches = [
+            token
+            for token in self._lib.get_tokens(token_label=token_label)
+            if slot is None or token.slot.slot_id == slot
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        visible = ", ".join(
+            f"slot {s.slot_id}: {s.get_token().label!r}"
+            for s in self._lib.get_slots(token_present=True)
+        )
+        raise SignerError(
+            f"PKCS11: matched {len(matches)} tokens for token_name={token_label!r} "
+            f"slot={slot!r}, need exactly 1. Visible via {lib_path!r}: "
+            f"{visible or '<no slot has a token present>'}"
+        )
+
+    @asynccontextmanager
+    async def _session(self):
+        session = await self._pool.get()
+        try:
+            yield session
+        finally:
+            self._pool.put_nowait(session)
+
+    async def _run_blocking(self, func: Callable[..., Any], *args: Any) -> Any:
+        operation = asyncio.create_task(asyncio.to_thread(func, *args))
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            while not operation.done():
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not operation.cancelled():
+                error = operation.exception()
+                if error is not None:
+                    LOGGER.error(
+                        "PKCS11 operation failed after caller cancellation",
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+            raise
+
+    def _audit(self, event: str, key_ref: str, key_type: KeyType, **extra) -> None:
+        AUDIT.info(
+            "pkcs11_signer %s",
+            event,
+            extra={
+                "event": event,
+                "provider": self._provider_name,
+                "key_ref": key_ref,
+                "key_type": key_type.key_type,
+                **extra,
+            },
+        )
+
+    def _check_key_type(self, key_type: KeyType) -> str:
+        curve = _CURVE_OID_BY_KEY_TYPE.get(key_type)
+        if curve is None:
+            raise WalletError(f"PKCS11Signer: unsupported key_type {key_type}")
+        return curve
+
+    # ---- Signer protocol ----
+
+    async def generate_keypair(self, key_ref: str, key_type: KeyType) -> str:
+        curve_name = self._check_key_type(key_type)
+        async with self._session() as session:
+            # Real HSMs enforce CKA_LABEL uniqueness; simulators (BouncyHsm)
+            # don't, so we pre-check.
+            with _wrap_pkcs11_errors("generate_keypair", key_ref):
+                await self._run_blocking(self._assert_key_ref_free_sync, session, key_ref)
+                der = await self._run_blocking(
+                    self._create_keypair_sync, session, key_ref, curve_name
+                )
+        verkey = _der_point_to_verkey(der)
+        self._audit("generate_keypair", key_ref, key_type)
+        return verkey
+
+    async def get_public_key(self, key_ref: str, key_type: KeyType) -> str:
+        self._check_key_type(key_type)
+        async with self._session() as session:
+            with _wrap_pkcs11_errors("get_public_key", key_ref):
+                der = await self._run_blocking(
+                    self._read_public_point_sync, session, key_ref
+                )
+        return _der_point_to_verkey(der)
+
+    async def sign(
+        self, key_ref: str, message: Union[List[bytes], bytes], key_type: KeyType
+    ) -> bytes:
+        self._check_key_type(key_type)
+        # ACA-Py sends a list only for BBS+, which needs a BLS key, not P-256.
+        if not isinstance(message, bytes):
+            raise WalletError("PKCS11Signer: multi-message signing is not supported")
+        digest = hashlib.sha256(message).digest()
+        async with self._session() as session:
+            with _wrap_pkcs11_errors("sign", key_ref):
+                signature = await self._run_blocking(
+                    self._sign_digest_sync, session, key_ref, digest
+                )
+        self._audit("sign", key_ref, key_type, message_digest=digest.hex())
+        return bytes(signature)
+
+    # ---- Blocking helpers (run inside asyncio.to_thread) ----
+
+    def _assert_key_ref_free_sync(self, session, key_ref: str) -> None:
+        try:
+            session.get_key(object_class=ObjectClass.PRIVATE_KEY, label=key_ref)
+        except pkcs11.NoSuchKey:
+            return
+        raise WalletError(
+            f"PKCS11Signer: key_ref {key_ref!r} already exists on the token"
+        )
+
+    def _create_keypair_sync(self, session, key_ref: str, curve_name: str) -> bytes:
+        ec_params = encode_named_curve_parameters(curve_name)
+        public_key, _ = session.generate_keypair(
+            P11KeyType.EC,
+            label=key_ref,
+            store=True,
+            mechanism=Mechanism.EC_KEY_PAIR_GEN,
+            public_template={Attribute.EC_PARAMS: ec_params},
+            private_template={
+                Attribute.SENSITIVE: True,
+                Attribute.EXTRACTABLE: False,
+                Attribute.SIGN: True,
+            },
+        )
+        return bytes(public_key[Attribute.EC_POINT])
+
+    def _read_public_point_sync(self, session, key_ref: str) -> bytes:
+        pub = session.get_key(object_class=ObjectClass.PUBLIC_KEY, label=key_ref)
+        return bytes(pub[Attribute.EC_POINT])
+
+    def _sign_digest_sync(self, session, key_ref: str, digest: bytes) -> bytes:
+        priv = session.get_key(object_class=ObjectClass.PRIVATE_KEY, label=key_ref)
+        return priv.sign(digest, mechanism=Mechanism.ECDSA)
